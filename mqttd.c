@@ -95,6 +95,10 @@
 
 #define MQTTD_CLIENT_CONNECT_MSG_FMT "{\"port_num\":%2d, \"msg_ver\":\"%s\"}"
 #define MQTTD_MSG_VER                "2.0"
+#define MQTTD_IPV4_STR_SIZE 		(16)
+
+#define MQTTD_RC4_ENABLE 			(0)
+
 
 /* MQTTD Server Login
 */
@@ -265,6 +269,7 @@ static timehandle_t ptr_mqttd_recon_time = NULL;
 
 void mqttd_rc4_encrypt(unsigned char *data, int data_len, const char *key, unsigned char *output) 
 {
+#if (MQTTD_RC4_ENABLE)
     int i, j = 0, k;
     unsigned char S[256];
     unsigned char temp;
@@ -292,6 +297,9 @@ void mqttd_rc4_encrypt(unsigned char *data, int data_len, const char *key, unsig
         S[j] = temp;
         output[k] = data[k] ^ S[(S[i] + S[j]) % 256];
     }
+#else
+    osapi_memcpy(output, data, data_len);
+#endif
 }
 
 #define mqttd_rc4_decrypt mqttd_rc4_encrypt
@@ -700,7 +708,7 @@ _mqttd_subscribe_db(
         osapi_free(ptr_msg);
         return rc;
     }
-    mqttd_debug_db("Subscribe DB success, db_msg =%p", ptr_msg);
+    osapi_printf("Subscribe DB success, db_msg =%p\n", ptr_msg);
     ptr_mqttd->db_subscribed = TRUE;
     return rc;
 }
@@ -770,10 +778,83 @@ _mqttd_unsubscribe_db(
 }
 
 /*publish sysinfo to mqtt cloud server with event topic*/
-static MW_ERROR_NO_T _mqttd_publish_sysinfo(MQTTD_CTRL_T *ptr_mqttd,  const void *ptr_data)
+static MW_ERROR_NO_T _mqttd_publish_sysinfo(MQTTD_CTRL_T *ptr_mqttd,  const DB_REQUEST_TYPE_T *req, const void *ptr_data)
 {
 	MW_ERROR_NO_T rc = MW_E_OK;
+    DB_MSG_T *db_msg = NULL;
+    UI16_T db_size = 0;
+    void *db_data = NULL;
+    DB_SYS_INFO_T *ptr_sys_info = NULL;
+	osapi_printf("publish sysinfo: T/F/E =%u/%u/%u\n", req->t_idx, req->f_idx, req->e_idx);
+	
+    rc = mqttd_queue_getData(SYS_INFO, DB_ALL_FIELDS, DB_ALL_ENTRIES, &db_msg, &db_size, &db_data);
+    if(MW_E_OK == rc)
+    {
+        /* If SUBACK received, then PUBLISH online event */
+        char topic[128];
+		C8_T ip_str[MQTTD_IPV4_STR_SIZE];
+        osapi_snprintf(topic, sizeof(topic), "%s/event", ptr_mqttd->topic_prefix);
+        ptr_sys_info = (DB_SYS_INFO_T *)db_data;
+        osapi_printf("sysinfo: db_size:%d\n", db_size);
+        cJSON *root = cJSON_CreateObject();
+        cJSON *data = cJSON_CreateObject();
+        cJSON *device = cJSON_CreateObject();
+        cJSON *ip = cJSON_CreateObject();
+        if (root == NULL || data == NULL || device == NULL || ip == NULL) {
+            mqttd_debug("Failed to create JSON objects\n");
+            if (root != NULL) cJSON_Delete(root);
+            if (data != NULL) cJSON_Delete(data);
+            if (device != NULL) cJSON_Delete(device);
+            if (ip != NULL) cJSON_Delete(ip);
+            return;
+        }
 
+	    cJSON_AddStringToObject(root, "type", "config");
+	    cJSON_AddItemToObject(root, "data", data);
+        cJSON_AddItemToObject(data, "device", device);
+	    cJSON_AddStringToObject(device, "n", ptr_sys_info->sys_name);
+        cJSON_AddItemToObject(data, "ip", ip);
+	    cJSON_AddBoolToObject(ip, "auip", ptr_sys_info->dhcp_enable);
+		
+		memset(ip_str, 0, MQTTD_IPV4_STR_SIZE);
+		MW_UTIL_IPV4_TO_STR(ip_str, PP_HTONL(ptr_sys_info->static_ip));
+	    cJSON_AddStringToObject(ip, "ip", ip_str);
+		
+		memset(ip_str, 0, MQTTD_IPV4_STR_SIZE);
+		MW_UTIL_IPV4_TO_STR(ip_str, PP_HTONL(ptr_sys_info->static_mask));
+	    cJSON_AddStringToObject(ip, "mask", ip_str);
+
+		memset(ip_str, 0, MQTTD_IPV4_STR_SIZE);
+		MW_UTIL_IPV4_TO_STR(ip_str, PP_HTONL(ptr_sys_info->static_gw));
+	    cJSON_AddStringToObject(ip, "gw", ip_str);
+		
+        cJSON_AddNumberToObject(ip, "aud", ptr_sys_info->autodns_enable);
+		
+		memset(ip_str, 0, MQTTD_IPV4_STR_SIZE);
+		MW_UTIL_IPV4_TO_STR(ip_str, PP_HTONL(ptr_sys_info->static_dns));
+	    cJSON_AddStringToObject(ip, "dns", ip_str);
+
+	    char *original_payload = cJSON_PrintUnformatted(root);
+	    cJSON_Delete(root);
+		osapi_free(db_msg);
+		
+		osapi_printf("sysinfo: payload:%s\n", original_payload);
+		
+	    if (original_payload == NULL) {
+	        osapi_printf("Failed to print JSON\n");
+            
+	        return;
+	    }
+
+		int original_payloadlen = strlen(original_payload);
+		unsigned char encoded_payload[512];
+		// Encrypt the payload using RC4
+    	mqttd_rc4_encrypt((unsigned char *)original_payload, original_payloadlen, MQTTD_RC4_KEY, encoded_payload);
+        mqtt_publish(ptr_mqttd->ptr_client, topic, (const void *)encoded_payload, original_payloadlen, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)ptr_mqttd);
+		free(original_payload); // Free the JSON payload
+        
+        osapi_printf("\nMQTT subscribe event topic with ip config done.\n");
+    }
 	return rc;
 }
 
@@ -937,7 +1018,7 @@ _mqttd_listen_db(
                 switch (req.t_idx)  /*TABLES_T*/
                 {
                     case SYS_INFO:
-						(void)_mqttd_publish_sysinfo(ptr_mqttd, ptr_data);
+						(void)_mqttd_publish_sysinfo(ptr_mqttd, &req, ptr_data);
                         break;
                     case ACCOUNT_INFO:
                         break;
@@ -1345,7 +1426,9 @@ static UI16_T _mqttd_db_topic_set(MQTTD_CTRL_T *ptr_mqttd, const UI8_T method, c
  */
 static void _mqttd_publish_cb(void *arg, err_t err)
 {
+	MQTTD_CTRL_T *ptr_mqttd = (MQTTD_CTRL_T *)arg;
     mqttd_debug("Send Publish control packet code: (%d).\n", err);
+	
 }
 
 /* FUNCTION NAME: _mqttd_publish_data
@@ -1611,7 +1694,7 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
     C8_T new_topic[MQTTD_MAX_TOPIC_SIZE] = {0};
     osapi_snprintf(new_topic, MQTTD_MAX_TOPIC_SIZE, "%s/tx", ptr_mqttd->topic_prefix);
 
-    mqttd_debug_pkt("Incoming data length: %d", len);
+    osapi_printf("Incoming data length: %d\n", len);
 
     /* tx */
     if (0 == osapi_strcmp(ptr_mqttd->pub_in_topic, new_topic))
@@ -1824,16 +1907,18 @@ static void _mqttd_subscribe_cb(void *arg, err_t err)
 	    }
 
 		int original_payloadlen = strlen(original_payload);
-		unsigned char encoded_payload[256]; // Ensure this is large enough for your payload
+		unsigned char encoded_payload[512]; // Ensure this is large enough for your payload
 		// Encrypt the payload using RC4
     	mqttd_rc4_encrypt((unsigned char *)original_payload, original_payloadlen, MQTTD_RC4_KEY, encoded_payload);
         mqtt_publish(ptr_mqttd->ptr_client, topic, (const void *)encoded_payload, original_payloadlen, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)ptr_mqttd);
 		free(original_payload); // Free the JSON payload
 		
-		osapi_printf("\n MQTT subscribe tx topic done.\n");
+		osapi_printf("\nMQTT subscribe tx topic done.\n");
 
 		
 		ptr_mqttd->state = MQTTD_STATE_SUBACK;
+		
+		ptr_mqttd->state = MQTTD_STATE_INITING;
     }
     else
     {
@@ -2752,7 +2837,7 @@ static void _mqttd_main(void *arg)
             case MQTTD_STATE_CONNECTED:
             {
                 // Set publish callback functions
-                _mqttd_send_subscribe(mqttd.ptr_client, (void *)&mqttd);//TO MQTT SERVER
+                _mqttd_send_subscribe(mqttd.ptr_client, (void *)&mqttd);//TO MQTT BROKER
                 break;
             }
             case MQTTD_STATE_INITING:
