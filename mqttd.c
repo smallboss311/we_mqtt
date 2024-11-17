@@ -60,8 +60,10 @@
 #include "osapi_string.h"
 #include "osapi_mutex.h"
 #include "db_api.h"
+#include "db_data.h"
 #include "inet_utils.h"
 #include "web.h"
+#include "hr_cjson.h"
 
 
 /* NAMING CONSTANT DECLARATIONS
@@ -96,7 +98,9 @@
 
 /* MQTTD Server Login
 */
-const ip_addr_t mqttd_server_ip = IPADDR4_INIT_BYTES(47, 237, 80, 17);  // for ikuai domain
+//const ip_addr_t mqttd_server_ip = IPADDR4_INIT_BYTES(47, 237, 80, 17);  // for ikuai domain
+const ip_addr_t mqttd_server_ip = IPADDR4_INIT_BYTES(192, 168, 0, 100);  // for ikuai domain
+
 #if LWIP_DNS
 const C8_T cloud_hostname[] = "swmgr.hruicloud.com";
 #endif
@@ -111,25 +115,25 @@ const C8_T cloud_hostname[] = "swmgr.hruicloud.com";
 #define MQTTD_TOPIC_PREFIX          "hongrui"
 #define MQTTD_TOPIC_CLOUD_PREFIX    "hongrui/sw"
 //Will message
-#define MQTTD_WILL_TOPIC            MQTTD_TOPIC_PREFIX "/will"
+//#define MQTTD_WILL_TOPIC            MQTTD_TOPIC_PREFIX "/will"
 #define MQTTD_WILL_QOS              (2)
 #define MQTTD_WILL_RETAIN           (1)
 //Normal message
-#define MQTTD_TOPIC_NEW             MQTTD_TOPIC_PREFIX "/new"
-#define MQTTD_TOPIC_DB              MQTTD_TOPIC_PREFIX "/db"
-#define MQTTD_TOPIC_INIT            MQTTD_TOPIC_DB "/init"
-#define MQTTD_TOPIC_DBRC            MQTTD_TOPIC_DB "/rc"
+//#define MQTTD_TOPIC_NEW             MQTTD_TOPIC_PREFIX "/new"
+//#define MQTTD_TOPIC_DB              MQTTD_TOPIC_PREFIX "/db"
+//#define MQTTD_TOPIC_INIT            MQTTD_TOPIC_DB "/init"
+//#define MQTTD_TOPIC_DBRC            MQTTD_TOPIC_DB "/rc"
 #define MQTTD_REQUEST_QOS           (0)
 #define MQTTD_REQUEST_RETAIN        (0)
 //Cloud message
-#define MQTTD_CLOUD_TODB            "mwcloud/db"
-#define MQTTD_SUB_CLOUD_FILTER      MQTTD_TOPIC_CLOUD_PREFIX "/#"
-#define MQTTD_CLOUD_CONNECTED       MQTTD_TOPIC_CLOUD_PREFIX "/connected"
-#define MQTTD_CLOUD_WILL            MQTTD_TOPIC_CLOUD_PREFIX "/will"
-#define MQTTD_CLOUD_CGI             MQTTD_TOPIC_CLOUD_PREFIX "/cgi"
+//#define MQTTD_CLOUD_TODB            "mwcloud/db"
+//#define MQTTD_SUB_CLOUD_FILTER      MQTTD_TOPIC_CLOUD_PREFIX "/#"
+//#define MQTTD_CLOUD_CONNECTED       MQTTD_TOPIC_CLOUD_PREFIX "/connected"
+//#define MQTTD_CLOUD_WILL            MQTTD_TOPIC_CLOUD_PREFIX "/will"
+//#define MQTTD_CLOUD_CGI             MQTTD_TOPIC_CLOUD_PREFIX "/cgi"
 //Normal Publish Topic format
 /* <msg topic>/<cldb_ID>/<table_name>/<field_name>/eidx */
-#define MQTTD_TOPIC_FORMAT          "%s/%hu/%s/%s/%hu"
+//#define MQTTD_TOPIC_FORMAT          "%s/%hu/%s/%s/%hu"
 
 /* MQTTD Publish Application message
 */
@@ -225,14 +229,14 @@ static MW_ERROR_NO_T _mqttd_append_remain_msg(MQTTD_CTRL_T *ptr_mqttd, C8_T *top
 static void _mqttd_send_remain_msg(MQTTD_CTRL_T *ptr_mqttd);
 static void _mqttd_tmr(timehandle_t ptr_xTimer);
 /*=== DB related local functions ===*/
-static UI8_T _mqttd_gen_client_id(MQTTD_CTRL_T *ptr_mqttd);
+static void _mqttd_gen_client_id(MQTTD_CTRL_T *ptr_mqttd);
 static MW_ERROR_NO_T _mqttd_subscribe_db(MQTTD_CTRL_T *ptr_mqttd);
 static MW_ERROR_NO_T _mqttd_unsubscribe_db(MQTTD_CTRL_T *ptr_mqttd);
 static void _mqttd_listen_db(MQTTD_CTRL_T *ptr_mqttd);
 /*=== MQTT related local functions ===*/
 static void _mqttd_cgi_proxy(MQTTD_CTRL_T *ptr_mqttd, const u8_t *data, u16_t len);
 static void _mqttd_dataDump(const void *data, UI16_T data_size);
-static UI16_T _mqttd_db_topic_set(MQTTD_CTRL_T *ptr_mqttd, const UI8_T method, const UI8_T t_idx, const UI8_T f_idx, const UI16_T e_idx, C8_T *topic, UI16_T buf_size);
+//static UI16_T _mqttd_db_topic_set(MQTTD_CTRL_T *ptr_mqttd, const UI8_T method, const UI8_T t_idx, const UI8_T f_idx, const UI16_T e_idx, C8_T *topic, UI16_T buf_size);
 static void _mqttd_publish_cb(void *arg, err_t err);
 static MW_ERROR_NO_T _mqttd_publish_data(MQTTD_CTRL_T *ptr_mqttd, const UI8_T method, C8_T *topic, const UI16_T data_size, const void *ptr_data);
 static void _mqttd_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len);
@@ -769,6 +773,7 @@ _mqttd_unsubscribe_db(
 static MW_ERROR_NO_T _mqttd_publish_sysinfo(MQTTD_CTRL_T *ptr_mqttd,  const void *ptr_data)
 {
 	MW_ERROR_NO_T rc = MW_E_OK;
+
 	return rc;
 }
 
@@ -1260,6 +1265,7 @@ static void _mqttd_dataDump(const void *data, UI16_T data_size)
     }
 }
 
+#if 0
 /* FUNCTION NAME: _mqttd_db_topic_set
  * PURPOSE:
  *      Set the DB notification to MQTT message topic
@@ -1322,6 +1328,7 @@ static UI16_T _mqttd_db_topic_set(MQTTD_CTRL_T *ptr_mqttd, const UI8_T method, c
     return (UI16_T)(length & 0xFFFF);
 }
 
+#endif
 /* FUNCTION NAME: _mqttd_publish_cb
  * PURPOSE:
  *      MQTTD publish callback function
@@ -1611,8 +1618,8 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
     {
         mqttd_debug_pkt("Incoming data: %s", data);
         // Allocate memory for decoded data
-        unsigned char *decoded_data = (unsigned char *)osapi_malloc(len);
-        if (decoded_data == NULL)
+        unsigned char *decoded_data = NULL;
+        if (osapi_malloc(len, MQTTD_TASK_NAME, &decoded_data) != MW_E_OK)
         {
             mqttd_debug("Failed to allocate memory for decoded data.");
             return;
@@ -1822,6 +1829,9 @@ static void _mqttd_subscribe_cb(void *arg, err_t err)
     	mqttd_rc4_encrypt((unsigned char *)original_payload, original_payloadlen, MQTTD_RC4_KEY, encoded_payload);
         mqtt_publish(ptr_mqttd->ptr_client, topic, (const void *)encoded_payload, original_payloadlen, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)ptr_mqttd);
 		free(original_payload); // Free the JSON payload
+		
+		osapi_printf("\n MQTT subscribe tx topic done.\n");
+
 		
 		ptr_mqttd->state = MQTTD_STATE_SUBACK;
     }
@@ -2065,7 +2075,7 @@ static MW_ERROR_NO_T _mqttd_client_connect(MQTTD_CTRL_T *ptr_mqttd)
     C8_T password[MQTTD_MAX_CLIENT_ID_SIZE] = MQTTD_PASSWD;
     //C8_T will_topic[MQTTD_MAX_TOPIC_SIZE] = MQTTD_WILL_TOPIC;
     struct mqtt_connect_client_info_t client_info;
-    UI16_T portnum = MQTT_PORT;
+    UI16_T portnum = MQTT_SRV_PORT;
 
     if (ptr_mqttd->ptr_client != NULL)
     {
@@ -2478,6 +2488,13 @@ void mqttd_dump_topic(void)
         t_idx++;
     }
 }
+
+#else
+void mqttd_dump_topic(void)
+{
+    osapi_printf("\nMQTTD supported DB Topics\n");
+}
+
 #endif
 
 /* FUNCTION NAME: mqttd_debug_enable
@@ -2644,6 +2661,7 @@ static void _mqttd_gen_client_id(MQTTD_CTRL_T *ptr_mqttd)
 	C8_T manufacturer[] = "hongrui";
 	C8_T device_type[] = "sw";
 	C8_T device_id_str[64] = {0};
+	int i;
     // Get SN and MAC address
     // TODO: Implement functions to get actual SN and MAC
     osapi_strncpy(ptr_mqttd->sn, "C171Z1YM000000", MQTTD_MAX_SN_SIZE-1);
@@ -2655,7 +2673,7 @@ static void _mqttd_gen_client_id(MQTTD_CTRL_T *ptr_mqttd)
     // Calculate MD5 of combined string
     md5(device_str, osapi_strlen(device_str), device_md5);
 
-    for (int i = 0; i < 16; i++) {
+    for (i = 0; i < 16; i++) {
         osapi_snprintf(&ptr_mqttd->device_id[i * 2], 3, "%02x", (unsigned char)device_md5[i]);
     }
     
