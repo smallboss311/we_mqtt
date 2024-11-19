@@ -75,7 +75,8 @@
 #define MQTTD_TIMER_NAME            "mqttdTmr"
 #define MQTTD_STACK_SIZE            (808)
 #define MQTTD_THREAD_PRI            (4)
-#define MQTTD_MAX_TOPIC_SIZE        (64)   // Topic MAX Length 42 + tail end
+#define MQTTD_MAX_TOPIC_SIZE        (64)
+
 #define MQTTD_TIMER_PERIOD          (500)
 #define MQTTD_MUX_LOCK_TIME         (50)
 #define MQTTD_MAX_REMAIN_MSG        (64)
@@ -145,6 +146,23 @@ const C8_T cloud_hostname[] = "swmgr.hruicloud.com";
 #define MQTTD_MAX_PACKET_SIZE       (MQTTD_MQX_OUTPUT_SIZE - 2 - 7)   /* MAX size of topic + payload, exclude the fix header and length */
 #define MQTTD_MSG_HEADER_SIZE       (sizeof(MQTTD_PUB_MSG_T) - DB_MSG_PTR_SIZE)     /* size of message header and length in PUBLISH payload */
 #define MQTTD_MAX_SESSION_ID        (255)
+
+
+typedef enum {
+    MQTTD_TX_CAPABILITY = 0,
+    MQTTD_TX_RULES = 1,
+    MQTTD_TX_GETCONFIG = 2,
+    MQTTD_TX_SETCONFIG = 3,
+    MQTTD_TX_RESET = 4,
+    MQTTD_TX_REBOOT = 5,
+    MQTTD_TX_REBOOTPORT = 6,
+    MQTTD_TX_CHECK = 7,
+    MQTTD_TX_TUNNEL = 8,
+    MQTTD_TX_UPDATE = 9,
+    MQTTD_TX_LOGS = 10,
+    MQTTD_TX_BIND = 11,
+    MQTTD_TX_MAX = 12,
+}MQTTD_TX_TYPE;
 /* MACRO FUNCTION DECLARATIONS
  */
 
@@ -304,6 +322,57 @@ void mqttd_rc4_encrypt(unsigned char *data, int data_len, const char *key, unsig
 
 #define mqttd_rc4_decrypt mqttd_rc4_encrypt
 
+
+#define MQTT_CHECK_COND(__shift__, __op__, __size__) do       \
+{                                                               \
+    if ((__shift__) __op__ (__size__))                          \
+    {                                                           \
+        ;                                                       \
+    }                                                           \
+    else                                                        \
+    {                                                           \
+        return (MW_E_BAD_PARAMETER);                           \
+    }                                                           \
+} while(0)
+
+
+MW_ERROR_NO_T
+mqttd_transStrToIpv4Addr(
+    const C8_T          *ptr_str,
+    MW_IPV4_T          *ptr_addr)
+{
+    UI32_T              value = 0, idx = 0, shift = 0;
+
+    osapi_memset(ptr_addr, 0, sizeof(MW_IPV4_T));
+
+    /* e.g. 192.168.1.2, token_len = 11 */
+    for (idx = 0; idx < osapi_strlen(ptr_str); idx++)
+    {
+        if (('0' <= ptr_str[idx]) && ('9' >= ptr_str[idx]))
+        {
+            value = (value * 10) + (ptr_str[idx] - '0');
+        }
+        else if ('.' == ptr_str[idx])
+        {
+            MQTT_CHECK_COND(value, <, 256); /* Error: invalid value */
+            MQTT_CHECK_COND(shift, <, 4);   /* Error: mem-overwrite */
+            *ptr_addr |= value << (24 - shift * 8);
+            shift += 1;
+            value = 0;
+        }
+        else
+        {
+            return (MW_E_BAD_PARAMETER); /* Error: not a digit number or dot */
+        }
+    }
+
+    /* last data */
+    MQTT_CHECK_COND(value, <, 256); /* Error: invalid value */
+    MQTT_CHECK_COND(shift, ==, 3);  /* Error: not an ipv4 addr */
+    *ptr_addr |= value << (24 - shift * 8);
+
+    return (MW_E_OK);
+}
 
 /* LOCAL SUBPROGRAM BODIES
  */
@@ -1592,6 +1661,121 @@ static void _mqttd_incoming_publish_cb(void *arg, const char *topic, u32_t tot_l
     osapi_memset(ptr_mqttd->pub_in_topic, 0, MQTTD_MAX_TOPIC_SIZE);
     osapi_strncpy(ptr_mqttd->pub_in_topic, topic, (MQTTD_MAX_TOPIC_SIZE-1));
 }
+
+static MW_ERROR_NO_T _mqttd_handle_setconfig_ip(MQTTD_CTRL_T *mqttdctl, cJSON *data_obj)
+{
+    MW_ERROR_NO_T rc = MW_E_OK;
+    DB_SYS_INFO_T sys_info;
+    DB_MSG_T *ptr_db_msg = NULL;
+    u16_t db_size = 0;
+    void *db_data = NULL;
+    memset(&sys_info, 0, sizeof(DB_SYS_INFO_T));
+
+    rc = mqttd_queue_getData(SYS_INFO, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_db_msg, &db_size, &db_data);
+    if (MW_E_OK != rc) {
+        mqttd_debug("get org DB sys_info failed(%d)\n", rc);
+        return rc;
+    }
+
+    memcpy(&sys_info, db_data, sizeof(DB_SYS_INFO_T));
+    MW_FREE(ptr_db_msg);
+
+    cJSON *dhcp_obj = cJSON_GetObjectItemCaseSensitive(data_obj, "auip");
+    if (dhcp_obj) {
+        sys_info.dhcp_enable = dhcp_obj->valueint;
+    }
+
+    cJSON *autodns_obj = cJSON_GetObjectItemCaseSensitive(data_obj, "aud");
+    if (autodns_obj) {
+        sys_info.autodns_enable = autodns_obj->valueint;
+    }
+
+    cJSON *ip_obj = cJSON_GetObjectItemCaseSensitive(data_obj, "ip");
+    if (ip_obj) {
+        MW_IPV4_T new_ip;
+        rc = mqttd_transStrToIpv4Addr(ip_obj->valuestring, &new_ip);
+        if (MW_E_OK == rc) {
+            sys_info.static_ip = new_ip;
+        }
+    }
+
+    cJSON *mask_obj = cJSON_GetObjectItemCaseSensitive(data_obj, "mask");
+    if (mask_obj) {
+        MW_IPV4_T new_mask;
+        rc = mqttd_transStrToIpv4Addr(mask_obj->valuestring, &new_mask);
+        if (MW_E_OK == rc) {
+            sys_info.static_mask = new_mask;
+        }
+    }
+
+    cJSON *gw_obj = cJSON_GetObjectItemCaseSensitive(data_obj, "gw");
+    if (gw_obj) {
+        MW_IPV4_T new_gw;
+        rc = mqttd_transStrToIpv4Addr(gw_obj->valuestring, &new_gw);
+        if (MW_E_OK == rc) {
+            sys_info.static_gw = new_gw;
+        }
+    }
+
+    cJSON *dns_obj = cJSON_GetObjectItemCaseSensitive(data_obj, "dns");
+    if (dns_obj) {
+        MW_IPV4_T new_dns;
+        rc = mqttd_transStrToIpv4Addr(dns_obj->valuestring, &new_dns);
+        if (MW_E_OK == rc) {
+            sys_info.static_dns = new_dns;
+        }
+    }
+
+    rc = mqttd_queue_setData(M_UPDATE, SYS_INFO, DB_ALL_FIELDS, DB_ALL_ENTRIES, &sys_info, sizeof(sys_info));
+    if (MW_E_OK != rc) {
+        mqttd_debug("Update DB sys_info failed(%d)\n", rc);
+    }
+
+    return rc;
+}
+
+
+
+static MW_ERROR_NO_T _mqttd_handle_setconfig_data(MQTTD_CTRL_T *mqttdctl,  cJSON *data_obj)
+{
+    MW_ERROR_NO_T rc = MW_E_OK;
+    mqttd_debug("Handling setConfig type.");
+    mqttd_debug("data_obj: %s", cJSON_Print(data_obj));
+    cJSON *child = NULL;
+    cJSON_ArrayForEach(child, data_obj)
+    {
+        if (osapi_strcmp(child->string, "ip") == 0) {
+            rc = _mqttd_handle_setconfig_ip(mqttdctl, child);
+            if (MW_E_OK != rc) {
+                mqttd_debug("Handling setConfig ip failed.");
+				return rc;
+            }
+        } else if (osapi_strcmp(child->string, "loop_guard") == 0) {
+            // Handle "loop_guard" case
+        } else if (osapi_strcmp(child->string, "port_setting") == 0) {
+            // Handle "port_setting" case
+        } else if (osapi_strcmp(child->string, "port_mirroring") == 0) {
+            // Handle "port_mirroring" case
+        } else if (osapi_strcmp(child->string, "port_isolate") == 0) {
+            // Handle "port_isolate" case
+        } else if (osapi_strcmp(child->string, "static_mac") == 0) {
+            // Handle "static_mac" case
+        } else if (osapi_strcmp(child->string, "filter_mac") == 0) {
+            // Handle "filter_mac" case
+        } else if (osapi_strcmp(child->string, "vlan_member") == 0) {
+            // Handle "vlan_member" case
+        } else if (osapi_strcmp(child->string, "vlan_setting") == 0) {
+            // Handle "vlan_setting" case
+        } else if (osapi_strcmp(child->string, "port_limit_rate") == 0) {
+            // Handle "port_limit_rate" case
+        } else if (osapi_strcmp(child->string, "storm_control") == 0) {
+            // Handle "storm_control" case
+        } else if (osapi_strcmp(child->string, "poe_control") == 0) {
+            // Handle "poe_control" case
+        }
+    }
+	return rc;
+}
 #if 0
 /* FUNCTION NAME: _mqttd_incoming_data_cb
  * PURPOSE:
@@ -1722,12 +1906,18 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
             osapi_free(decoded_data);
             return;
         }
-
+		MW_ERROR_NO_T rc = MW_E_OK;
         // Check the type field in the JSON data
         cJSON *type_obj = cJSON_GetObjectItemCaseSensitive(json_obj, "type");
-        if (cJSON_IsString(type_obj) && (type_obj->valuestring != NULL))
+        cJSON *msgid_obj = cJSON_GetObjectItemCaseSensitive(json_obj, "msg_id");
+        cJSON *data_obj = cJSON_GetObjectItemCaseSensitive(json_obj, "data");
+        if ((cJSON_IsString(type_obj) && (type_obj->valuestring != NULL)) &&
+            (cJSON_IsString(msgid_obj) && (msgid_obj->valuestring != NULL)) &&
+            (cJSON_IsObject(data_obj) && (data_obj->child != NULL)))
         {
             const char *type_str = type_obj->valuestring;
+            const char *msgid_str = msgid_obj->valuestring;
+
             mqttd_debug("Type in JSON data: %s", type_str);
 
             // Handle different types
@@ -1746,27 +1936,41 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
             }
             else if (osapi_strcmp(type_str, "setConfig") == 0)
             {
-                mqttd_debug("Handling setConfig type.");
+            	rc = _mqttd_handle_setconfig_data(ptr_mqttd, data_obj);
+				if(rc != MW_E_OK)
+				{
+					mqttd_debug("Handling setConfig type failed.");
+				}
+				else
+				{
+					mqttd_debug("Handling setConfig type done.");
+				}
+
             }
             else if (osapi_strcmp(type_str, "reset") == 0)
             {
                 mqttd_debug("Handling reset type.");
+
             }
             else if (osapi_strcmp(type_str, "reboot") == 0)
             {
                 mqttd_debug("Handling reboot type.");
+
             }
             else if (osapi_strcmp(type_str, "rebootPort") == 0)
             {
                 mqttd_debug("Handling rebootPort type.");
+
             }
             else if (osapi_strcmp(type_str, "check") == 0)
             {
                 mqttd_debug("Handling check type.");
+
             }
             else if (osapi_strcmp(type_str, "tunnel") == 0)
             {
                 mqttd_debug("Handling tunnel type.");
+
             }
             else if (osapi_strcmp(type_str, "update") == 0)
             {
@@ -1775,6 +1979,7 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
             else if (osapi_strcmp(type_str, "logs") == 0)
             {
                 mqttd_debug("Handling logs type.");
+
             }
             else if (osapi_strcmp(type_str, "bind") == 0)
             {
@@ -1784,11 +1989,17 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
             {
                 mqttd_debug("Unhandled type: %s", type_str);
             }
+
         }
         else
         {
             mqttd_debug("Type field not found in JSON data.");
+			rc = MW_E_NOT_SUPPORT;
         }
+
+		//send reponse back
+
+		
         // Clean up
         cJSON_Delete(json_obj);
 
