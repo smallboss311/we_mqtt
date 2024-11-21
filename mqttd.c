@@ -1695,7 +1695,7 @@ static MW_ERROR_NO_T _mqttd_handle_setconfig_ip(MQTTD_CTRL_T *mqttdctl, cJSON *d
         MW_IPV4_T new_ip;
         rc = mqttd_transStrToIpv4Addr(ip_obj->valuestring, &new_ip);
         if (MW_E_OK == rc) {
-            sys_info.static_ip = new_ip;
+            sys_info.static_ip = PP_HTONL(new_ip);
         }
     }
 
@@ -1704,7 +1704,7 @@ static MW_ERROR_NO_T _mqttd_handle_setconfig_ip(MQTTD_CTRL_T *mqttdctl, cJSON *d
         MW_IPV4_T new_mask;
         rc = mqttd_transStrToIpv4Addr(mask_obj->valuestring, &new_mask);
         if (MW_E_OK == rc) {
-            sys_info.static_mask = new_mask;
+            sys_info.static_mask = PP_HTONL(new_mask);
         }
     }
 
@@ -1713,7 +1713,7 @@ static MW_ERROR_NO_T _mqttd_handle_setconfig_ip(MQTTD_CTRL_T *mqttdctl, cJSON *d
         MW_IPV4_T new_gw;
         rc = mqttd_transStrToIpv4Addr(gw_obj->valuestring, &new_gw);
         if (MW_E_OK == rc) {
-            sys_info.static_gw = new_gw;
+            sys_info.static_gw = PP_HTONL(new_gw);
         }
     }
 
@@ -1722,7 +1722,7 @@ static MW_ERROR_NO_T _mqttd_handle_setconfig_ip(MQTTD_CTRL_T *mqttdctl, cJSON *d
         MW_IPV4_T new_dns;
         rc = mqttd_transStrToIpv4Addr(dns_obj->valuestring, &new_dns);
         if (MW_E_OK == rc) {
-            sys_info.static_dns = new_dns;
+            sys_info.static_dns = PP_HTONL(new_dns);
         }
     }
 
@@ -1739,8 +1739,8 @@ static MW_ERROR_NO_T _mqttd_handle_setconfig_ip(MQTTD_CTRL_T *mqttdctl, cJSON *d
 static MW_ERROR_NO_T _mqttd_handle_setconfig_data(MQTTD_CTRL_T *mqttdctl,  cJSON *data_obj)
 {
     MW_ERROR_NO_T rc = MW_E_OK;
-    mqttd_debug("Handling setConfig type.");
-    mqttd_debug("data_obj: %s", cJSON_Print(data_obj));
+    osapi_printf("Handling setConfig type.\n");
+    osapi_printf("data_obj: %s\n", cJSON_Print(data_obj));
     cJSON *child = NULL;
     cJSON_ArrayForEach(child, data_obj)
     {
@@ -1945,7 +1945,6 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
 				{
 					mqttd_debug("Handling setConfig type done.");
 				}
-
             }
             else if (osapi_strcmp(type_str, "reset") == 0)
             {
