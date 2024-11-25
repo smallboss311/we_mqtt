@@ -147,6 +147,11 @@ const C8_T cloud_hostname[] = "swmgr.hruicloud.com";
 #define MQTTD_MSG_HEADER_SIZE       (sizeof(MQTTD_PUB_MSG_T) - DB_MSG_PTR_SIZE)     /* size of message header and length in PUBLISH payload */
 #define MQTTD_MAX_SESSION_ID        (255)
 
+#define MQTTD_TICK_PER_SECOND       (1000/MQTTD_TIMER_PERIOD)
+#define MQTTD_PERIOD_IN_SECOND      (300)
+#define MQTTD_PERIOD_TICK           (MQTTD_PERIOD_IN_SECOND * MQTTD_TICK_PER_SECOND)
+#define MQTTD_STATUS_TICK_OFFSET    (0)
+#define MQTTD_MAC_TICK_OFFSET       (10)
 
 typedef enum {
     MQTTD_TX_CAPABILITY = 0,
@@ -236,6 +241,9 @@ typedef struct MQTTD_CTRL_S
     C8_T            pub_in_topic[MQTTD_MAX_TOPIC_SIZE];
     UI8_T           remain_msgs;    /* Not yet sent message count */
     MQTTD_PUB_LIST_T *msg_head;
+	UI32_T			ticknum;
+	UI16_T          status_ontick;
+	UI16_T          mac_ontick;
 } ATTRIBUTE_PACK MQTTD_CTRL_T;
 
 /* GLOBAL VARIABLE DECLARATIONS
@@ -409,6 +417,9 @@ static void _mqttd_ctrl_init(MQTTD_CTRL_T *ptr_mqttd, ip_addr_t *server_ip)
     ptr_mqttd->remain_msgs = 0;
     ptr_mqttd->msg_head = NULL;
     ptr_mqttd->reconnect = FALSE;
+    ptr_mqttd->ticknum = 0;
+    ptr_mqttd->status_ontick = MQTTD_PERIOD_TICK;
+    ptr_mqttd->mac_ontick = MQTTD_PERIOD_TICK;
 }
 
 /* FUNCTION NAME:  _mqttd_ctrl_free
@@ -625,6 +636,19 @@ static void _mqttd_send_remain_msg(MQTTD_CTRL_T *ptr_mqttd)
     }
 }
 
+static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
+{
+    // Implement the logic to publish the status
+    mqttd_debug("Publishing port status...");
+    // Add your status publishing code here
+}
+
+static void _mqttd_publish_mac(MQTTD_CTRL_T *ptr_mqttd)
+{
+    // Implement the logic to publish the MAC address
+    mqttd_debug("Publishing MAC table...");
+    // Add your MAC address publishing code here
+}
 
 /* FUNCTION NAME:  _mqttd_tmr
  * PURPOSE:
@@ -647,7 +671,16 @@ static void _mqttd_tmr(timehandle_t ptr_xTimer)
     if (mqttd.state == MQTTD_STATE_RUN)
     {
         _mqttd_send_remain_msg(&mqttd);
+		if((mqttd.ticknum + MQTTD_STATUS_TICK_OFFSET) % mqttd.status_ontick == 0)
+		{
+			_mqttd_publish_status(&mqttd);
+		}
+		if((mqttd.ticknum +  MQTTD_MAC_TICK_OFFSET) % mqttd.mac_ontick == 0)
+		{
+			_mqttd_publish_mac(&mqttd);
+		}
     }
+	mqttd.ticknum++;
 }
 /*=== DB related local functions ===*/
 
