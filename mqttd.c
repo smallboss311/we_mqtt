@@ -270,7 +270,7 @@ static void _mqttd_dataDump(const void *data, UI16_T data_size);
 static void _mqttd_publish_cb(void *arg, err_t err);
 static MW_ERROR_NO_T _mqttd_publish_data(MQTTD_CTRL_T *ptr_mqttd, const UI8_T method, C8_T *topic, const UI16_T data_size, const void *ptr_data);
 static void _mqttd_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len);
-static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags);
+static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags, u8_t qos);
 static void _mqttd_subscribe_cb(void *arg, err_t err);
 static void _mqttd_send_subscribe(mqtt_client_t *client, void *arg);
 static void _mqttd_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status);
@@ -2527,7 +2527,7 @@ static MW_ERROR_NO_T  _mqttd_handle_reboot(MQTTD_CTRL_T *mqttdctl,  cJSON *data_
  * NOTES:
  *
  */
-static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags)
+static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags, u8_t qos)
 {
     MQTTD_CTRL_T *ptr_mqttd = (MQTTD_CTRL_T *)arg;
     UI16_T idata = 0;
@@ -2607,7 +2607,7 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
  * NOTES:
  *
  */
-static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags)
+static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags, u8_t qos)
 {
     MQTTD_CTRL_T *ptr_mqttd = (MQTTD_CTRL_T *)arg;
     UI16_T idata = 0;
@@ -2616,6 +2616,9 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
 
     osapi_printf("Incoming data length: %d\n", len);
 
+	/*send ack first*/
+	mqtt_pub_ack_rec_rel_response(ptr_mqttd->ptr_client, ptr_mqttd->ptr_client->inpub_pkt_id, flags, qos);
+	
     /* tx */
     if (0 == osapi_strcmp(ptr_mqttd->pub_in_topic, new_topic))
     {
@@ -2767,6 +2770,10 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
     {
         mqttd_debug("No valid topic found, doing nothing.");
     }
+
+
+
+	
 }
 
 #endif
