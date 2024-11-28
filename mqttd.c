@@ -2220,6 +2220,44 @@ static MW_ERROR_NO_T _mqttd_handle_setconfig_vlan_setting(MQTTD_CTRL_T *mqttdctl
 
 }
 
+static MW_ERROR_NO_T _mqttd_handle_rules_data(MQTTD_CTRL_T *mqttdctl,  cJSON *data_obj)
+{
+    MW_ERROR_NO_T rc = MW_E_OK;
+    osapi_printf("Handling rules type.\n");
+    osapi_printf("data_obj: %s\n", cJSON_Print(data_obj));
+    cJSON *entry = NULL;
+    cJSON_ArrayForEach(entry, data_obj)
+    {
+        if(cJSON_IsObject(entry))
+        {
+            int period = 0;
+            cJSON *name_item = cJSON_GetObjectItemCaseSensitive(entry, "name");
+            if (cJSON_IsString(name_item) && osapi_strcmp(name_item->valuestring, "status") == 0)
+            {
+                cJSON *period_item = cJSON_GetObjectItemCaseSensitive(entry, "period");
+                if (cJSON_IsNumber(period_item))
+                {
+                    period = period_item->valueint;
+                    mqttd_debug("Setting status_ontick to %d", period);
+                    mqttdctl->status_ontick = period;
+                }
+            }
+            else if(osapi_strcmp(name_item->valuestring, "macs") == 0)
+            {
+                int period = 0;
+                cJSON *period_item = cJSON_GetObjectItemCaseSensitive(entry, "period");
+                if (cJSON_IsNumber(period_item))
+                {
+                    period = period_item->valueint;
+                    mqttd_debug("Setting macs_ontick to %d", period);
+                    mqttdctl->mac_ontick = period;
+                }
+            }
+           
+        }
+    }
+    return rc;
+}
 
 static MW_ERROR_NO_T _mqttd_handle_setconfig_data(MQTTD_CTRL_T *mqttdctl,  cJSON *data_obj)
 {
@@ -2673,7 +2711,16 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
             }
             else if (osapi_strcmp(type_str, "rules") == 0 && (cJSON_IsObject(data_obj) && (data_obj->child != NULL)))
             {
-                mqttd_debug("Handling rules type.");
+                rc = _mqttd_handle_rules_data(ptr_mqttd, data_obj);
+				if(rc != MW_E_OK)
+				{
+					mqttd_debug("Handling rules type failed.");
+				}
+				else
+				{
+					mqttd_debug("Handling rules type done.");
+				}
+
             }
             else if (osapi_strcmp(type_str, "getConfig") == 0 && (cJSON_IsObject(data_obj) && (data_obj->child != NULL)))
             {
