@@ -2508,8 +2508,7 @@ static MW_ERROR_NO_T _mqttd_handle_getconfig_port_setting(MQTTD_CTRL_T *mqttdctl
     DB_MSG_T *ptr_db_msg = NULL;
     u16_t db_size = 0;
     void *db_data = NULL;
-    
-    
+    osapi_printf("_mqttd_handle_getconfig_port_setting.\n");
     cJSON *json_port_info = cJSON_CreateArray();
     if (json_port_info == NULL)
     {
@@ -2547,6 +2546,18 @@ static MW_ERROR_NO_T _mqttd_handle_getconfig_port_setting(MQTTD_CTRL_T *mqttdctl
     }
 
     cJSON_AddItemToObject(data_obj, "port_setting", json_port_info);
+#if 1
+    char *data_obj_str = cJSON_Print(data_obj);
+    if (data_obj_str == NULL)
+    {
+        osapi_printf("Failed to print JSON object.\n");
+    }
+    else
+    {
+        osapi_printf("data_obj: %s\n", data_obj_str);
+        cJSON_free(data_obj_str);
+    }
+#endif
 	return rc;
 }
 
@@ -2558,6 +2569,7 @@ static MW_ERROR_NO_T _mqttd_handle_getconfig_static_mac(MQTTD_CTRL_T *mqttdctl, 
     DB_MSG_T *ptr_db_msg = NULL;
     u16_t db_size = 0;
     void *db_data = NULL;
+	osapi_printf("mqttd_handle_getconfig_static_mac.\n");
     memset(&static_mac_info, 0, sizeof(DB_STATIC_MAC_ENTRY_T));
     rc = mqttd_queue_getData(STATIC_MAC_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_db_msg, &db_size, &db_data);
     if(MW_E_OK != rc)
@@ -2577,9 +2589,11 @@ static MW_ERROR_NO_T _mqttd_handle_getconfig_static_mac(MQTTD_CTRL_T *mqttdctl, 
     int i = 0;
     for (i = 0; i < MAX_STATIC_MAC_NUM; i++)
     {
+        //blank entry
+        #if 0
         if(static_mac_info.port[i] == 0)
             continue;
-
+        #endif
         cJSON *json_mac_entry = cJSON_CreateObject();
         if (json_mac_entry == NULL)
         {
@@ -2601,6 +2615,18 @@ static MW_ERROR_NO_T _mqttd_handle_getconfig_static_mac(MQTTD_CTRL_T *mqttdctl, 
     }
 
     cJSON_AddItemToObject(data_obj, "static_mac", json_mac_info);
+#if 1
+    char *data_obj_str = cJSON_Print(data_obj);
+    if (data_obj_str == NULL)
+    {
+        osapi_printf("Failed to print JSON object.\n");
+    }
+    else
+    {
+        osapi_printf("data_obj: %s\n", data_obj_str);
+        cJSON_free(data_obj_str);
+    }
+#endif
 	return rc;
 }
 
@@ -2608,79 +2634,82 @@ static MW_ERROR_NO_T _mqttd_handle_getconfig_data(MQTTD_CTRL_T *mqttdctl,  cJSON
 {
     MW_ERROR_NO_T rc = MW_E_OK;
     osapi_printf("Handling setConfig type.\n");
-    //osapi_printf("data_obj: %s\n", cJSON_Print(data_obj));
+    osapi_printf("_mqttd_handle_getconfig_data: %s\n", cJSON_Print(data_obj));
     char topic[128];
     osapi_snprintf(topic, sizeof(topic), "%s/rx", mqttdctl->topic_prefix);
     cJSON *root = cJSON_CreateObject();
     cJSON *data = cJSON_CreateObject();
-	cJSON *continuity = cJSON_CreateObject();
-	cJSON *result = cJSON_CreateObject();
 	
 	cJSON_AddStringToObject(root, "type", "getconf");
     cJSON_AddStringToObject(root, "msg_id", msgid_obj->valuestring);
-	
-	cJSON_AddItemToObject(root, "continuity", continuity);
-	cJSON_AddItemToObject(root, "result", result);
-	cJSON_SetIntValue(continuity, 0);
-	cJSON_SetValuestring(result, "ok");
-	
+	cJSON_AddNumberToObject(root, "continuity", 0);
+	cJSON_AddStringToObject(root, "result", "ok");
+
+	cJSON *result = cJSON_GetObjectItemCaseSensitive(root, "result");
+    cJSON *continuity = cJSON_GetObjectItemCaseSensitive(root, "continuity");
     cJSON *child = NULL;
+    cJSON *data_obj_item = NULL;
     cJSON_ArrayForEach(child, data_obj)
     {
-    	if (osapi_strcmp(child->string, "remote_protocols") == 0) {
-            rc = _mqttd_handle_getconfig_remote_protocols(mqttdctl, data);
-            if (MW_E_OK != rc) {
-                mqttd_debug("Handling setConfig remote_protocols failed.");
-				break;
+        if (cJSON_IsString(child) && (child->valuestring != NULL))
+        {
+            osapi_printf("data_obj item: %s\n", child->valuestring);
+            if (osapi_strcmp(child->valuestring, "remote_protocols") == 0) {
+                rc = _mqttd_handle_getconfig_remote_protocols(mqttdctl, data);
+                if (MW_E_OK != rc) {
+                    mqttd_debug("Handling setConfig remote_protocols failed.");
+                    break;
+                }
+            } 
+            else if (osapi_strcmp(child->valuestring, "device") == 0) {
+                rc = _mqttd_handle_getconfig_device(mqttdctl, data);
+                if (MW_E_OK != rc) {
+                    mqttd_debug("Handling setConfig device failed.");
+                    break;
+                }
+            } else if (osapi_strcmp(child->valuestring, "ip") == 0) {
+                rc = _mqttd_handle_getconfig_ip(mqttdctl, data);
+                if (MW_E_OK != rc) {
+                    mqttd_debug("Handling setConfig device failed.");
+                    break;
+                }
+                // Handle "loop_guard" case
+            } else if (osapi_strcmp(child->valuestring, "loop_guard") == 0) {
+                // Handle "port_setting" case
+            } else if (osapi_strcmp(child->valuestring, "port_setting") == 0) {
+                rc = _mqttd_handle_getconfig_port_setting(mqttdctl, data);
+                if (MW_E_OK != rc) {
+                    mqttd_debug("Handling setConfig device failed.");
+                    break;
+                }
+                // Handle "port_mirroring" case
+            } else if (osapi_strcmp(child->valuestring, "port_mirroring") == 0) {
+                // Handle "port_isolate" case
+            } else if (osapi_strcmp(child->valuestring, "port_isolate") == 0) {
+                // Handle "static_mac" case
+            } else if (osapi_strcmp(child->valuestring, "static_mac") == 0) {
+                rc = _mqttd_handle_getconfig_static_mac(mqttdctl, data);
+                if (MW_E_OK != rc) {
+                    mqttd_debug("Handling setConfig device failed.");
+                    break;
+                }
+                // Handle "filter_mac" case
+            } else if (osapi_strcmp(child->valuestring, "filter_mac") == 0) {
+                // Handle "filter_mac" case
+            } else if (osapi_strcmp(child->valuestring, "vlan_member") == 0) {
+                // Handle "vlan_member" case
+            } else if (osapi_strcmp(child->valuestring, "vlan_setting") == 0) {
+                // Handle "vlan_setting" case
+            } else if (osapi_strcmp(child->valuestring, "port_limit_rate") == 0) {
+                // Handle "port_limit_rate" case
+            } else if (osapi_strcmp(child->valuestring, "storm_control") == 0) {
+                // Handle "storm_control" case
+            } else if (osapi_strcmp(child->valuestring, "poe_control") == 0) {
+                // Handle "poe_control" case
             }
-        } 
-        else if(osapi_strcmp(child->string, "device") == 0) {
-            rc = _mqttd_handle_getconfig_device(mqttdctl, data);
-            if (MW_E_OK != rc) {
-                mqttd_debug("Handling setConfig device failed.");
-				break;
-            }
-        } else if (osapi_strcmp(child->string, "ip") == 0) {
-        	rc = _mqttd_handle_getconfig_ip(mqttdctl, data);
-            if (MW_E_OK != rc) {
-                mqttd_debug("Handling setConfig device failed.");
-				break;
-            }
-            // Handle "loop_guard" case
-        } else if (osapi_strcmp(child->string, "loop_guard") == 0) {
-            // Handle "port_setting" case
-        } else if (osapi_strcmp(child->string, "port_setting") == 0) {
-        	rc = _mqttd_handle_getconfig_port_setting(mqttdctl, data);
-            if (MW_E_OK != rc) {
-                mqttd_debug("Handling setConfig device failed.");
-				break;
-            }
-            // Handle "port_mirroring" case
-        } else if (osapi_strcmp(child->string, "port_mirroring") == 0) {
-            // Handle "port_isolate" case
-        } else if (osapi_strcmp(child->string, "port_isolate") == 0) {
-            // Handle "static_mac" case
-        } else if (osapi_strcmp(child->string, "static_mac") == 0) {
-        	rc = _mqttd_handle_getconfig_static_mac(mqttdctl, data);
-            if (MW_E_OK != rc) {
-                mqttd_debug("Handling setConfig device failed.");
-				break;
-            }
-            // Handle "filter_mac" case
-        } else if (osapi_strcmp(child->string, "filter_mac") == 0) {
-            // Handle "filter_mac" case
-        } else if (osapi_strcmp(child->string, "vlan_member") == 0) {
-            // Handle "vlan_member" case
-        } else if (osapi_strcmp(child->string, "vlan_setting") == 0) {
-            // Handle "vlan_setting" case
-        } else if (osapi_strcmp(child->string, "port_limit_rate") == 0) {
-            // Handle "port_limit_rate" case
-        } else if (osapi_strcmp(child->string, "storm_control") == 0) {
-            // Handle "storm_control" case
-        } else if (osapi_strcmp(child->string, "poe_control") == 0) {
-            // Handle "poe_control" case
         }
     }
+
     char *original_payload = NULL;
     int original_payloadlen = 0;
     //send error result
