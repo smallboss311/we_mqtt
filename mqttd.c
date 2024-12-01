@@ -62,10 +62,15 @@
 #include "db_api.h"
 #include "db_data.h"
 #include "inet_utils.h"
+#include "vlan_utils.h"
+#include "air_l2.h"
 #include "web.h"
 #include "hr_cjson.h"
-
-
+#ifdef AIR_SUPPORT_SFP
+#include "sfp_db.h"
+#define SFP_DB_PORT_MODE_BASIC_PORT_TYPE_OFFSET    (6) /* port type bit7-6 */
+#define SFP_DB_PORT_MODE_BASIC_PORT_TYPE_BITMASK    (0x03) /* port type bit7-6 */
+#endif
 /* NAMING CONSTANT DECLARATIONS
 */
 
@@ -680,16 +685,338 @@ static void _mqttd_send_remain_msg(MQTTD_CTRL_T *ptr_mqttd)
 
 static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
 {
+    MW_ERROR_NO_T rc = MW_E_OK;
+	DB_PORT_OPER_INFO_T port_oper_info;
+    DB_PORT_CFG_INFO_T port_cfg_info;
+    DB_MSG_T *ptr_db_msg = NULL;
+    u16_t db_size = 0;
+    void *db_data = NULL;
     // Implement the logic to publish the status
-    mqttd_debug("Publishing port status...");
-    // Add your status publishing code here
+    osapi_printf("Publishing port status...\n");
+    char topic[128];
+    osapi_snprintf(topic, sizeof(topic), "%s/period", ptr_mqttd->topic_prefix);
+    cJSON *root = cJSON_CreateObject();
+    cJSON *data = cJSON_CreateObject();
+    cJSON *sys = cJSON_CreateObject();
+	
+    cJSON_AddStringToObject(root, "type", "status");
+	cJSON_AddNumberToObject(root, "continuity", 0);
+	cJSON_AddItemToObject(root, "data", data);
+    cJSON_AddItemToObject(data, "sys", sys);
+   
+	cJSON *continuity = cJSON_GetObjectItemCaseSensitive(root, "continuity");
+	
+	/*sys info*/
+	cJSON_AddNumberToObject(sys, "runtime", 0);
+	
+	/*port info*/
+    cJSON *json_port_status = cJSON_CreateArray();
+    if (json_port_status == NULL)
+    {
+        mqttd_debug("Failed to create JSON array for port status.");
+        return MW_E_NO_MEMORY;
+    }
+	cJSON_AddItemToObject(data, "ports", json_port_status);
+	
+    int i = 0;
+    for (i = 0; i < PLAT_MAX_PORT_NUM; i++)
+    {
+        cJSON *json_port_entry = cJSON_CreateObject();
+        memset(&port_oper_info, 0, sizeof(DB_PORT_OPER_INFO_T));
+        rc = mqttd_queue_getData(PORT_OPER_INFO, DB_ALL_FIELDS, i, &ptr_db_msg, &db_size, &db_data);
+        if(MW_E_OK != rc)
+	    {
+	        mqttd_debug("Get org DB port_oper_info failed(%d)\n", rc);
+			return;
+	    }
+        memcpy(&port_oper_info, db_data, sizeof(DB_PORT_OPER_INFO_T));
+	    MW_FREE(ptr_db_msg);
+
+        memset(&port_cfg_info, 0, sizeof(DB_PORT_CFG_INFO_T));
+        rc = mqttd_queue_getData(PORT_CFG_INFO, DB_ALL_FIELDS, i, &ptr_db_msg, &db_size, &db_data);
+	    if(MW_E_OK != rc)
+	    {
+	        mqttd_debug("Get org DB port_cfg_info failed(%d)\n", rc);
+			return;
+	    }
+        memcpy(&port_cfg_info, db_data, sizeof(DB_PORT_CFG_INFO_T));
+	    MW_FREE(ptr_db_msg);
+
+        cJSON_AddNumberToObject(json_port_entry, "index", i);
+        cJSON_AddStringToObject(json_port_entry, "name", "port");
+
+#ifdef AIR_SUPPORT_SFP
+		SFP_DB_PORT_BASIC_TYPE_T basic_port_type = (port_oper_info.oper_mode >> SFP_DB_PORT_MODE_BASIC_PORT_TYPE_OFFSET) & SFP_DB_PORT_MODE_BASIC_PORT_TYPE_BITMASK;
+		if(basic_port_type == SFP_DB_PORT_BASIC_TYPE_BASET)
+        	cJSON_AddNumberToObject(json_port_entry, "type", 0);
+		else if(basic_port_type == SFP_DB_PORT_BASIC_TYPE_XSGMII)
+			cJSON_AddNumberToObject(json_port_entry, "type", 1);
+		else
+			cJSON_AddNumberToObject(json_port_entry, "type", 0);
+#else
+		cJSON_AddNumberToObject(json_port_entry, "type", 0);
+#endif
+		if(port_cfg_info.admin_status == 0)
+		{
+			cJSON_AddStringToObject(json_port_entry, "state", "close");
+		}
+		else
+		{
+			if(port_oper_info.oper_status)
+				cJSON_AddStringToObject(json_port_entry, "state", "up");
+			else
+				cJSON_AddStringToObject(json_port_entry, "state", "down");
+		}
+        cJSON_AddNumberToObject(json_port_entry, "speed", port_oper_info.oper_speed);
+        cJSON_AddNumberToObject(json_port_entry, "duplex", port_oper_info.oper_duplex);
+		
+        cJSON_AddNumberToObject(json_port_entry, "poe", 0);
+        cJSON_AddNumberToObject(json_port_entry, "power", -1);
+		cJSON_AddNumberToObject(json_port_entry, "txRate", 0);
+		cJSON_AddNumberToObject(json_port_entry, "rxRate", 0);
+        //cJSON_AddBoolToObject(json_port_entry, "block", FALSE);
+        cJSON_AddItemToArray(json_port_status, json_port_entry);
+    }
+
+	
+    char *original_payload = NULL;
+    int original_payloadlen = 0;
+ 
+    original_payload = cJSON_PrintUnformatted(root);
+    if (original_payload == NULL) {
+        osapi_printf("Failed to print getconf JSON\n");
+        cJSON_Delete(root);
+        return;
+    }
+    cJSON_Delete(root);
+    original_payloadlen = strlen(original_payload)+1;
+    if(original_payloadlen > MQTTD_MAX_PACKET_SIZE*MQTTD_MAX_CHUNK_NUM)
+    {
+        mqttd_debug("Original payload length is too long:%d.", original_payloadlen);
+        mqtt_free(original_payload);
+        return;
+    }
+
+    if(original_payloadlen <= MQTTD_MAX_PACKET_SIZE)
+    {
+        osapi_memset(ptr_mqttd->mqtt_buff, 0, MQTTD_MQX_OUTPUT_SIZE);
+        mqttd_rc4_encrypt((unsigned char *)original_payload, original_payloadlen, MQTTD_RC4_KEY, ptr_mqttd->mqtt_buff);
+        mqtt_publish(ptr_mqttd->ptr_client, topic, (const void *)ptr_mqttd->mqtt_buff, original_payloadlen, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)ptr_mqttd);
+    }
+    else
+    {
+        int chunk_num = original_payloadlen / MQTTD_MAX_PACKET_SIZE + 1;
+        mqtt_free(original_payload);
+		cJSON_SetIntValue(continuity, chunk_num);
+        int i = 0;
+        for(i = 0; i < chunk_num; i++)
+        {
+            osapi_memset(ptr_mqttd->mqtt_buff, 0, MQTTD_MQX_OUTPUT_SIZE);
+            mqttd_rc4_encrypt((unsigned char *)original_payload + i * MQTTD_MAX_PACKET_SIZE, MQTTD_MAX_PACKET_SIZE, MQTTD_RC4_KEY, ptr_mqttd->mqtt_buff);
+            mqtt_publish(ptr_mqttd->ptr_client, topic, (const void *)ptr_mqttd->mqtt_buff, MQTTD_MAX_PACKET_SIZE, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)ptr_mqttd);
+        }
+    }
+    return;
 }
 
 static void _mqttd_publish_mac(MQTTD_CTRL_T *ptr_mqttd)
 {
+    MW_ERROR_NO_T rc = MW_E_OK;
+    DB_MSG_T *ptr_db_msg = NULL;
+    u16_t db_size = 0;
+    void *db_data = NULL;
+
     // Implement the logic to publish the MAC address
-    mqttd_debug("Publishing MAC table...");
-    // Add your MAC address publishing code here
+    osapi_printf("Publishing MAC table...");
+    char topic[128];
+    osapi_snprintf(topic, sizeof(topic), "%s/period", ptr_mqttd->topic_prefix);
+    cJSON *root = cJSON_CreateObject();
+    cJSON *data = cJSON_CreateArray();
+	
+    cJSON_AddStringToObject(root, "type", "macs");
+	cJSON_AddNumberToObject(root, "continuity", 0);
+    cJSON_AddItemToObject(root, "data", data);
+	cJSON *continuity = cJSON_GetObjectItemCaseSensitive(root, "continuity");
+	cJSON *json_port_status = cJSON_CreateArray();
+	/*
+	1. Get PORT_CFG_INFO vlanlist（DB_PORT_CFG_INFO_T vlan_list）
+	2.1 Loop BITMAP_VLAN_FOREACH vlanlist
+	2.2 Get VLAN_ENTRY （DB_VLAN_ENTRY_T, loop VLAN_ENTRY (not implement)
+	3. vlan + port search in STATIC_MAC_ENTRY（DB_STATIC_MAC_ENTRY_T）and air_l2_searchMacAddr
+	*/
+	int i;
+	UI32_T vid = 0;
+	DB_PORT_CFG_INFO_T port_cfg_info;
+	DB_STATIC_MAC_ENTRY_T static_mac;
+	
+	for (i = 0; i < PLAT_MAX_PORT_NUM; i++)
+    {
+    	
+        memset(&port_cfg_info, 0, sizeof(DB_PORT_CFG_INFO_T));
+	    rc = mqttd_queue_getData(PORT_CFG_INFO, DB_ALL_FIELDS, i, &ptr_db_msg, &db_size, &db_data);
+	    if(MW_E_OK != rc)
+	    {
+	        mqttd_debug("Get org DB port_cfg_info failed(%d)\n", rc);
+			return;
+	    }
+	    memcpy(&port_cfg_info, db_data, sizeof(DB_PORT_CFG_INFO_T));
+	    MW_FREE(ptr_db_msg);
+
+		if(port_cfg_info.vlan_list == 0)
+			continue;
+		
+		/*get static mac*/
+		memset(&static_mac, 0, sizeof(DB_STATIC_MAC_ENTRY_T));
+	    rc = mqttd_queue_getData(STATIC_MAC_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_db_msg, &db_size, &db_data);
+	    if(MW_E_OK != rc)
+	    {
+	        mqttd_debug("Get org DB static mac failed(%d)\n", rc);
+			return;
+	    }
+	    memcpy(&static_mac, db_data, sizeof(DB_STATIC_MAC_ENTRY_T));
+	    MW_FREE(ptr_db_msg);
+		cJSON *json_port_entry = cJSON_CreateObject();
+		cJSON_AddNumberToObject(json_port_entry, "p", i);
+		cJSON *vlan_info = cJSON_CreateArray();
+		cJSON_AddItemToObject(json_port_entry, "vlan_info", vlan_info);
+		BITMAP_VLAN_FOREACH(port_cfg_info.vlan_list, vid)
+		{
+			int j, found=0;
+			cJSON *vlan_entry = cJSON_CreateObject();
+
+			cJSON *mac_info = cJSON_CreateArray();
+			/*static mac*/
+			for(j = 0; j < MAX_STATIC_MAC_NUM; j++)
+			{
+				if(static_mac.vid[j] == vid && static_mac.port[j] == i)
+				{
+                    char mac_str[18];
+					cJSON *static_mac_entry = cJSON_CreateObject();
+                    snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+                            static_mac.mac_addr[j][0], static_mac.mac_addr[j][1],
+                            static_mac.mac_addr[j][2], static_mac.mac_addr[j][3],
+                            static_mac.mac_addr[j][4], static_mac.mac_addr[j][5]); 
+					cJSON_AddStringToObject(static_mac_entry, "mac", mac_str);
+					cJSON_AddNumberToObject(static_mac_entry, "ty", 2);
+					cJSON_AddItemToArray(mac_info, static_mac_entry);
+					found = 1;
+				}
+			}
+			/*l2 mac*/
+			UI32_T  unit = 0, bucket_size = 0;
+            UI8_T   count;
+            AIR_ERROR_NO_T ari_rc = AIR_E_OK;
+            ari_rc = air_l2_getMacBucketSize(unit, &bucket_size);
+			if(ari_rc != AIR_E_OK)
+			{
+				continue;
+			}
+            AIR_MAC_ENTRY_T *ptr_mt=NULL;
+            ptr_mt = mqttd_malloc(sizeof(AIR_MAC_ENTRY_T) * bucket_size);
+			if(ptr_mt == NULL)
+			{
+				continue;
+			}
+            memset(ptr_mt, 0, sizeof(AIR_MAC_ENTRY_T) * bucket_size);
+
+			ari_rc = air_l2_searchMacAddr(unit, AIR_L2_MAC_SEARCH_TYPE_PORT, i, &count, ptr_mt);
+			if(ari_rc == AIR_E_ENTRY_NOT_FOUND)
+			{
+                mqttd_free(ptr_mt);
+				continue;
+			}
+			for(j = 0; j < count; j++)
+			{
+                if(ptr_mt[j].cvid != vid || !AIR_PORT_CHK(ptr_mt[j].port_bitmap, i))//not match vlan or port
+                    continue;
+                //match vlan and port
+                char mac_str[18];
+				cJSON *l2_mac_entry = cJSON_CreateObject();
+                snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+                        ptr_mt[j].mac[0], ptr_mt[j].mac[1],
+                        ptr_mt[j].mac[2], ptr_mt[j].mac[3],
+                        ptr_mt[j].mac[4], ptr_mt[j].mac[5]); 
+				cJSON_AddStringToObject(l2_mac_entry, "mac", mac_str);
+				cJSON_AddNumberToObject(l2_mac_entry, "ty", 1);
+				cJSON_AddItemToArray(mac_info, l2_mac_entry);
+				found = 1;
+			}
+            if(count < bucket_size)//no more mac
+            {
+                mqttd_free(ptr_mt);
+                continue;
+            }
+            //more l2 mac
+            while(1)
+            {
+                memset(ptr_mt, 0, sizeof(AIR_MAC_ENTRY_T) * bucket_size);
+                ari_rc = air_l2_searchNextMacAddr(unit, AIR_L2_MAC_SEARCH_TYPE_PORT, i, &count, ptr_mt);
+                if(ari_rc == AIR_E_ENTRY_NOT_FOUND)
+                    break;
+                for(j = 0; j < count; j++)
+                {
+                    if(ptr_mt[j].cvid != vid || !AIR_PORT_CHK(ptr_mt[j].port_bitmap, i))//not match vlan or port
+                        continue;
+                    //match vlan and port
+                    char mac_str[18];
+					cJSON *l2_mac_entry = cJSON_CreateObject();
+                    snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+                            ptr_mt[j].mac[0], ptr_mt[j].mac[1],
+                            ptr_mt[j].mac[2], ptr_mt[j].mac[3],
+                            ptr_mt[j].mac[4], ptr_mt[j].mac[5]); 
+					cJSON_AddStringToObject(l2_mac_entry, "mac", mac_str);
+					cJSON_AddNumberToObject(l2_mac_entry, "ty", 1);
+					cJSON_AddItemToArray(mac_info, l2_mac_entry);
+					found = 1;
+                }   
+            }
+			mqttd_free(ptr_mt);
+			if(found)
+				cJSON_AddItemToArray(vlan_entry, mac_info);
+			
+			cJSON_AddItemToArray(vlan_info, vlan_entry);
+		}
+
+		cJSON_AddItemToArray(json_port_status, json_port_entry);
+	}
+	
+	char *original_payload = NULL;
+    int original_payloadlen = 0;
+	original_payload = cJSON_PrintUnformatted(root);
+    if (original_payload == NULL) {
+        osapi_printf("Failed to print getconf JSON\n");
+        cJSON_Delete(root);
+        return;
+    }
+    original_payloadlen = strlen(original_payload)+1;
+    if(original_payloadlen > MQTTD_MAX_PACKET_SIZE*MQTTD_MAX_CHUNK_NUM)
+    {
+        mqttd_debug("Original payload length is too long:%d.", original_payloadlen);
+        mqtt_free(original_payload);
+        cJSON_Delete(root);
+        return;
+    }
+
+    if(original_payloadlen <= MQTTD_MAX_PACKET_SIZE)
+    {
+        osapi_memset(ptr_mqttd->mqtt_buff, 0, MQTTD_MQX_OUTPUT_SIZE);
+        mqttd_rc4_encrypt((unsigned char *)original_payload, original_payloadlen, MQTTD_RC4_KEY, ptr_mqttd->mqtt_buff);
+        mqtt_publish(ptr_mqttd->ptr_client, topic, (const void *)ptr_mqttd->mqtt_buff, original_payloadlen, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)ptr_mqttd);
+    }
+    else
+    {
+        int chunk_num = original_payloadlen / MQTTD_MAX_PACKET_SIZE + 1;
+        mqtt_free(original_payload);
+        cJSON_SetIntValue(continuity, chunk_num);
+        int i = 0;
+        for(i = 0; i < chunk_num; i++)
+        {
+            osapi_memset(ptr_mqttd->mqtt_buff, 0, MQTTD_MQX_OUTPUT_SIZE);
+            mqttd_rc4_encrypt((unsigned char *)original_payload + i * MQTTD_MAX_PACKET_SIZE, MQTTD_MAX_PACKET_SIZE, MQTTD_RC4_KEY, ptr_mqttd->mqtt_buff);
+            mqtt_publish(ptr_mqttd->ptr_client, topic, (const void *)ptr_mqttd->mqtt_buff, MQTTD_MAX_PACKET_SIZE, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)ptr_mqttd);
+        }
+    }
+	
 }
 
 /* FUNCTION NAME:  _mqttd_tmr
@@ -712,7 +1039,7 @@ static void _mqttd_tmr(timehandle_t ptr_xTimer)
 {
     if (mqttd.state == MQTTD_STATE_RUN)
     {
-        _mqttd_send_remain_msg(&mqttd);
+        //_mqttd_send_remain_msg(&mqttd);
 		if((mqttd.ticknum + MQTTD_STATUS_TICK_OFFSET) % mqttd.status_ontick == 0)
 		{
 			_mqttd_publish_status(&mqttd);
