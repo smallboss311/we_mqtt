@@ -155,8 +155,8 @@ const C8_T cloud_hostname[] = "swmgr.hruicloud.com";
 #define MQTTD_TICK_PER_SECOND       (1000/MQTTD_TIMER_PERIOD)
 #define MQTTD_PERIOD_IN_SECOND      (300)
 #define MQTTD_PERIOD_TICK           (MQTTD_PERIOD_IN_SECOND * MQTTD_TICK_PER_SECOND)
-#define MQTTD_STATUS_TICK_OFFSET    (0)
-#define MQTTD_MAC_TICK_OFFSET       (10)
+#define MQTTD_STATUS_TICK_OFFSET    (10)
+#define MQTTD_MAC_TICK_OFFSET       (0)
 #define MQTTD_MAX_CHUNK_NUM         (3)
 typedef enum {
     MQTTD_TX_CAPABILITY = 0,
@@ -845,90 +845,76 @@ static void _mqttd_publish_macs(MQTTD_CTRL_T *ptr_mqttd)
 	cJSON_AddNumberToObject(root, "continuity", 0);
     cJSON_AddItemToObject(root, "data", data);
 	cJSON *continuity = cJSON_GetObjectItemCaseSensitive(root, "continuity");
-	cJSON *json_port_status = cJSON_CreateArray();
+	
 	/*
 	1. Get PORT_CFG_INFO vlanlist(DB_PORT_CFG_INFO_T vlan_list)
 	2.1 Loop BITMAP_VLAN_FOREACH vlanlist
 	2.2 Get vid from VLAN_ENTRY (DB_VLAN_ENTRY_T, loop VLAN_ENTRY 
 	3. vlan + port search in STATIC_MAC_ENTRY（DB_STATIC_MAC_ENTRY_T）and air_l2_searchMacAddr
 	*/
-	int i;
+	int i, j;
 	UI16_T vid_idx = 0;
-	DB_PORT_CFG_INFO_T *port_cfg_info = NULL;
 	DB_STATIC_MAC_ENTRY_T *static_mac = NULL;
-	DB_VLAN_ENTRY_T *vlan_entry_info = NULL;
-	
-    port_cfg_info = mqtt_malloc(sizeof(DB_PORT_CFG_INFO_T));
-	static_mac = mqtt_malloc(sizeof(DB_STATIC_MAC_ENTRY_T));
-	vlan_entry_info = mqtt_malloc(sizeof(DB_VLAN_ENTRY_T));
-	if(port_cfg_info == NULL || static_mac == NULL || vlan_entry_info == NULL)
-	{
-		mqttd_debug("Failed to allocate memory for port_cfg_info, static_mac, or vlan_entry_info.");
-		return;
-	}
+    static_mac = mqtt_malloc(sizeof(DB_STATIC_MAC_ENTRY_T));
+    if (static_mac == NULL) {
+        mqttd_debug("Failed to allocate memory for static_mac.");
+        return;
+    }
+    /*get static mac*/
+    memset(static_mac, 0, sizeof(DB_STATIC_MAC_ENTRY_T));
+    rc = mqttd_queue_getData(STATIC_MAC_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_db_msg, &db_size, &db_data);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("Get org DB static mac failed(%d)\n", rc);
+        mqtt_free(static_mac);
+        return;
+    }
+    memcpy(static_mac, db_data, sizeof(DB_STATIC_MAC_ENTRY_T));
+    mqtt_free(ptr_db_msg);
+
+
 	for (i = 0; i < PLAT_MAX_PORT_NUM; i++)
     {
-    	
-        memset(port_cfg_info, 0, sizeof(DB_PORT_CFG_INFO_T));
+    	UI32_T   vlan_list = 0; 
+    	int      found = 0;
 	    rc = mqttd_queue_getData(PORT_CFG_INFO, DB_ALL_FIELDS, i, &ptr_db_msg, &db_size, &db_data);
 	    if(MW_E_OK != rc)
 	    {
 	        mqttd_debug("Get org DB port_cfg_info failed(%d)\n", rc);
-			mqtt_free(port_cfg_info);
-			mqtt_free(static_mac);
-			mqtt_free(vlan_entry_info);
 			return;
 	    }
-	    memcpy(port_cfg_info, db_data, sizeof(DB_PORT_CFG_INFO_T));
+        vlan_list = ((DB_PORT_CFG_INFO_T *)db_data)->vlan_list;
 	    mqtt_free(ptr_db_msg);
 
-		if(port_cfg_info->vlan_list == 0)
+		if(vlan_list == 0)
 		{
 			osapi_printf("Port[%d] vlan_list is blank\n", i);
 			continue;
 		}
-		memset(vlan_entry_info, 0, sizeof(DB_VLAN_ENTRY_T));
-	    rc = mqttd_queue_getData(VLAN_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_db_msg, &db_size, &db_data);
-	    if(MW_E_OK != rc)
-	    {
-	        mqttd_debug("Get org DB vlan_info failed(%d)\n", rc);
-			mqtt_free(port_cfg_info);
-			mqtt_free(static_mac);
-			mqtt_free(vlan_entry_info);
-			return;
-	    }
-	    memcpy(vlan_entry_info, db_data, sizeof(DB_VLAN_ENTRY_T));
-	    mqtt_free(ptr_db_msg);
-		
-		/*get static mac*/
-		memset(static_mac, 0, sizeof(DB_STATIC_MAC_ENTRY_T));
-	    rc = mqttd_queue_getData(STATIC_MAC_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_db_msg, &db_size, &db_data);
-	    if(MW_E_OK != rc)
-	    {
-	        mqttd_debug("Get org DB static mac failed(%d)\n", rc);
-			mqtt_free(port_cfg_info);
-			mqtt_free(static_mac);
-			mqtt_free(vlan_entry_info);
-			return;
-	    }
-	    memcpy(static_mac, db_data, sizeof(DB_STATIC_MAC_ENTRY_T));
-	    mqtt_free(ptr_db_msg);
+        osapi_printf("Port[%d] vlan_list is 0x%x\n", i, vlan_list);
 
-		
 		cJSON *json_port_entry = cJSON_CreateObject();
-		cJSON_AddNumberToObject(json_port_entry, "p", i);
 		cJSON *vlan_info = cJSON_CreateArray();
-		cJSON_AddItemToObject(json_port_entry, "vlan_info", vlan_info);
-		BITMAP_VLAN_FOREACH(port_cfg_info->vlan_list, vid_idx)
-		{
-			int j, found=0;
-			cJSON *vlan_entry = cJSON_CreateObject();
 
+		BITMAP_VLAN_FOREACH(vlan_list, vid_idx)
+		{
+            UI16_T vlan_id = 0;
+			//get vlan id
+		    rc = mqttd_queue_getData(VLAN_ENTRY, DB_ALL_FIELDS, vid_idx, &ptr_db_msg, &db_size, &db_data);
+		    if(MW_E_OK != rc)
+		    {
+		        mqttd_debug("Get org DB vlan_info failed(%d)\n", rc);
+				return;
+            }
+            vlan_id = ((VLAN_ENTRY_INFO_T *)db_data)->vlan_id;
+            mqtt_free(ptr_db_msg);
+
+			cJSON *vlan_entry = cJSON_CreateObject();
 			cJSON *mac_info = cJSON_CreateArray();
 			/*static mac*/
 			for(j = 0; j < MAX_STATIC_MAC_NUM; j++)
 			{
-				if(static_mac->vid[j] == vlan_entry_info->vlan_id[vid_idx] && static_mac->port[j] == i)
+				if(static_mac->vid[j] == vlan_id && static_mac->port[j] == i)
 				{
                     char mac_str[18];
 					cJSON *static_mac_entry = cJSON_CreateObject();
@@ -939,15 +925,17 @@ static void _mqttd_publish_macs(MQTTD_CTRL_T *ptr_mqttd)
 					cJSON_AddStringToObject(static_mac_entry, "mac", mac_str);
 					cJSON_AddNumberToObject(static_mac_entry, "ty", 2);
 					cJSON_AddItemToArray(mac_info, static_mac_entry);
-					found = 1;
+					found++;
+                    osapi_printf("Found static mac: %s, port: %d, vlan: %d\n", mac_str, i, vlan_id);
+					break;
 				}
 			}
 			/*l2 mac*/
-			UI32_T  unit = 0, bucket_size = 0;
-            UI8_T   count;
-            AIR_ERROR_NO_T ari_rc = AIR_E_OK;
-            ari_rc = air_l2_getMacBucketSize(unit, &bucket_size);
-			if(ari_rc != AIR_E_OK)
+			UI32_T  bucket_size = 0;
+            UI8_T   count = 0;
+            AIR_ERROR_NO_T air_rc = AIR_E_OK;
+            air_rc = air_l2_getMacBucketSize(0, &bucket_size);
+			if(air_rc != AIR_E_OK)
 			{
 				continue;
 			}
@@ -955,19 +943,26 @@ static void _mqttd_publish_macs(MQTTD_CTRL_T *ptr_mqttd)
             ptr_mt = mqtt_malloc(sizeof(AIR_MAC_ENTRY_T) * bucket_size);
 			if(ptr_mt == NULL)
 			{
+                osapi_printf("Failed to allocate memory for ptr_mt, bucket_size: %d.\n", bucket_size);
 				continue;
 			}
             memset(ptr_mt, 0, sizeof(AIR_MAC_ENTRY_T) * bucket_size);
 
-			ari_rc = air_l2_searchMacAddr(unit, AIR_L2_MAC_SEARCH_TYPE_PORT, i, &count, ptr_mt);
-			if(ari_rc == AIR_E_ENTRY_NOT_FOUND)
+			air_rc = air_l2_searchMacAddr(0, AIR_L2_MAC_SEARCH_TYPE_PORT, i, &count, ptr_mt);
+			if(air_rc == AIR_E_ENTRY_NOT_FOUND)
 			{
                 mqtt_free(ptr_mt);
+                osapi_printf("No l2 mac found for port: %d.\n", i);
 				continue;
 			}
+            osapi_printf("Found %d l2 mac for port: %d.\n", count, i);
 			for(j = 0; j < count; j++)
 			{
-                if(ptr_mt[j].cvid != vlan_entry_info->vlan_id[vid_idx] || !AIR_PORT_CHK(ptr_mt[j].port_bitmap, i))//not match vlan or port
+                osapi_printf("l2 mac[%d]: %02x:%02x:%02x:%02x:%02x:%02x, cvid: %d, port_bitmap: 0x%x\n", j,
+                            ptr_mt[j].mac[0], ptr_mt[j].mac[1], ptr_mt[j].mac[2], ptr_mt[j].mac[3],
+                            ptr_mt[j].mac[4], ptr_mt[j].mac[5], ptr_mt[j].cvid, ptr_mt[j].port_bitmap[0]);
+
+                if(ptr_mt[j].cvid != vlan_id || !AIR_PORT_CHK(ptr_mt[j].port_bitmap, i))//not match vlan or port
                     continue;
                 //match vlan and port
                 char mac_str[18];
@@ -979,7 +974,7 @@ static void _mqttd_publish_macs(MQTTD_CTRL_T *ptr_mqttd)
 				cJSON_AddStringToObject(l2_mac_entry, "mac", mac_str);
 				cJSON_AddNumberToObject(l2_mac_entry, "ty", 1);
 				cJSON_AddItemToArray(mac_info, l2_mac_entry);
-				found = 1;
+				found++;
 			}
             if(count < bucket_size)//no more mac
             {
@@ -991,12 +986,18 @@ static void _mqttd_publish_macs(MQTTD_CTRL_T *ptr_mqttd)
             while(1)
             {
                 memset(ptr_mt, 0, sizeof(AIR_MAC_ENTRY_T) * bucket_size);
-                ari_rc = air_l2_searchNextMacAddr(unit, AIR_L2_MAC_SEARCH_TYPE_PORT, i, &count, ptr_mt);
-                if(ari_rc == AIR_E_ENTRY_NOT_FOUND)
+                air_rc = air_l2_searchNextMacAddr(0, AIR_L2_MAC_SEARCH_TYPE_PORT, i, &count, ptr_mt);
+                if(air_rc == AIR_E_ENTRY_NOT_FOUND)
                     break;
                 for(j = 0; j < count; j++)
                 {
-                    if(ptr_mt[j].cvid != vlan_entry_info->vlan_id[vid_idx] || !AIR_PORT_CHK(ptr_mt[j].port_bitmap, i))//not match vlan or port
+                    osapi_printf("l2 mac[%d]: %02x:%02x:%02x:%02x:%02x:%02x, cvid: %d, port_bitmap: 0x%x\n", j,
+                                ptr_mt[j].mac[0], ptr_mt[j].mac[1],
+                                ptr_mt[j].mac[2], ptr_mt[j].mac[3],
+                                ptr_mt[j].mac[4], ptr_mt[j].mac[5],
+                                ptr_mt[j].cvid, ptr_mt[j].port_bitmap[0]);
+
+                    if(ptr_mt[j].cvid != vlan_id || !AIR_PORT_CHK(ptr_mt[j].port_bitmap, i))//not match vlan or port
                         continue;
                     //match vlan and port
                     char mac_str[18];
@@ -1008,22 +1009,39 @@ static void _mqttd_publish_macs(MQTTD_CTRL_T *ptr_mqttd)
 					cJSON_AddStringToObject(l2_mac_entry, "mac", mac_str);
 					cJSON_AddNumberToObject(l2_mac_entry, "ty", 1);
 					cJSON_AddItemToArray(mac_info, l2_mac_entry);
-					found = 1;
+					found++;
                 }   
             }
 			mqtt_free(ptr_mt);
-			if(found)
-				cJSON_AddItemToArray(vlan_entry, mac_info);
-			
-			cJSON_AddItemToArray(vlan_info, vlan_entry);
+			if(found > 0)
+            {
+				cJSON_AddNumberToObject(vlan_entry, "vid", vlan_id);
+				cJSON_AddItemToObject(vlan_entry, "mac_info", mac_info);
+				cJSON_AddItemToArray(vlan_info, vlan_entry);
+			}
+			else
+			{
+				cJSON_Delete(mac_info);
+				cJSON_Delete(vlan_entry);
+			}
+
 		}
 
-		cJSON_AddItemToArray(json_port_status, json_port_entry);
+		if(found > 0)
+		{
+			cJSON_AddNumberToObject(json_port_entry, "p", i);
+			cJSON_AddItemToObject(json_port_entry, "vlan_info", vlan_info);
+			cJSON_AddItemToArray(data, json_port_entry);
+		}
+		else
+		{
+			cJSON_Delete(json_port_entry);
+			cJSON_Delete(vlan_info);
+		}
+		
 	}
 
-	mqtt_free(port_cfg_info);
 	mqtt_free(static_mac);
-	mqtt_free(vlan_entry_info);
 			
 	char *original_payload = NULL;
     int original_payloadlen = 0;
@@ -1033,12 +1051,12 @@ static void _mqttd_publish_macs(MQTTD_CTRL_T *ptr_mqttd)
         cJSON_Delete(root);
         return;
     }
+    cJSON_Delete(root);
     original_payloadlen = strlen(original_payload)+1;
     if(original_payloadlen > MQTTD_MAX_PACKET_SIZE*MQTTD_MAX_CHUNK_NUM)
     {
         mqttd_debug("Original payload length is too long:%d.", original_payloadlen);
         mqtt_free(original_payload);
-        cJSON_Delete(root);
         return;
     }
 
@@ -1053,7 +1071,6 @@ static void _mqttd_publish_macs(MQTTD_CTRL_T *ptr_mqttd)
         int chunk_num = original_payloadlen / MQTTD_MAX_PACKET_SIZE + 1;
         mqtt_free(original_payload);
         cJSON_SetIntValue(continuity, chunk_num);
-        int i = 0;
         for(i = 0; i < chunk_num; i++)
         {
             osapi_memset(ptr_mqttd->mqtt_buff, 0, MQTTD_MQX_OUTPUT_SIZE);
@@ -1359,7 +1376,7 @@ static MW_ERROR_NO_T _mqttd_publish_sysinfo(MQTTD_CTRL_T *ptr_mqttd,  const DB_R
 	        return MW_E_NO_MEMORY;
 	    }
         osapi_printf("sysinfo: payload:%s\n", original_payload);
-		int original_payloadlen = strlen(original_payload);
+		int original_payloadlen = strlen(original_payload)+1;
 		// Encrypt the payload using RC4
     	mqttd_rc4_encrypt((unsigned char *)original_payload, original_payloadlen, MQTTD_RC4_KEY, ptr_mqttd->mqtt_buff);
         mqtt_publish(ptr_mqttd->ptr_client, topic, (const void *)ptr_mqttd->mqtt_buff, original_payloadlen, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)ptr_mqttd);
@@ -1429,7 +1446,7 @@ static MW_ERROR_NO_T _mqttd_publish_portcfg(MQTTD_CTRL_T *ptr_mqttd,  const DB_R
 	    }
 		osapi_printf("portcfg: payload:%s\n", original_payload);
 
-		int original_payloadlen = strlen(original_payload);
+		int original_payloadlen = strlen(original_payload)+1;
 		// Encrypt the payload using RC4
     	mqttd_rc4_encrypt((unsigned char *)original_payload, original_payloadlen, MQTTD_RC4_KEY, ptr_mqttd->mqtt_buff);
         mqtt_publish(ptr_mqttd->ptr_client, topic, (const void *)ptr_mqttd->mqtt_buff, original_payloadlen, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)ptr_mqttd);
