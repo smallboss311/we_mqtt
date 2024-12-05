@@ -43,9 +43,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <air_chipscu.h>
 #include "mqttd.h"
 #include "mqttd_queue.h"
 #include "mw_error.h"
+#include "mw_utils.h"
 #include "lwip/ip.h"
 #include "lwip/ip_addr.h"
 #include "lwip/apps/mqtt.h"
@@ -133,7 +135,7 @@ const C8_T cloud_hostname[] = "swmgr.hruicloud.com";
 //#define MQTTD_TOPIC_DB              MQTTD_TOPIC_PREFIX "/db"
 //#define MQTTD_TOPIC_INIT            MQTTD_TOPIC_DB "/init"
 //#define MQTTD_TOPIC_DBRC            MQTTD_TOPIC_DB "/rc"
-#define MQTTD_REQUEST_QOS           (0)
+#define MQTTD_REQUEST_QOS           (1) //TODO:0
 #define MQTTD_REQUEST_RETAIN        (0)
 //Cloud message
 //#define MQTTD_CLOUD_TODB            "mwcloud/db"
@@ -720,6 +722,7 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
     if (root == NULL)
     {
         osapi_printf("Failed to create JSON object for root.");
+        mqtt_free(port_cfg_info);
         return;
     }
 
@@ -728,6 +731,7 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
     {
         osapi_printf("Failed to create JSON object for data.");
         cJSON_Delete(root);
+        mqtt_free(port_cfg_info);
         return;
     }
 
@@ -737,6 +741,7 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
         osapi_printf("Failed to create JSON object for sys.");
         cJSON_Delete(root);
         cJSON_Delete(data);
+        mqtt_free(port_cfg_info);
         return;
     }
 	
@@ -756,6 +761,7 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
     {
         mqttd_debug("Failed to create JSON array for port status.");
         cJSON_Delete(root);
+        mqtt_free(port_cfg_info);
         return ;
     }
 	cJSON_AddItemToObject(data, "ports", json_port_status);
@@ -774,7 +780,8 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
         if(MW_E_OK != rc)
 	    {
 	        mqttd_debug("Get org DB port_oper_info failed(%d)\n", rc);
-			return;
+	        cJSON_Delete(json_port_entry);
+			break;
 	    }
         memcpy(&port_oper_info, db_data, sizeof(DB_PORT_OPER_INFO_T));
 	    mqtt_free(ptr_db_msg);
@@ -784,7 +791,8 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
 	    if(MW_E_OK != rc)
 	    {
 	        mqttd_debug("Get org DB port_cfg_info failed(%d)\n", rc);
-			return;
+	        cJSON_Delete(json_port_entry);
+			break;
 	    }
         memcpy(port_cfg_info, db_data, sizeof(DB_PORT_CFG_INFO_T));
 	    mqtt_free(ptr_db_msg);
@@ -825,6 +833,7 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
         cJSON_AddItemToArray(json_port_status, json_port_entry);
     }
 
+	mqtt_free(port_cfg_info);
 	
     char *original_payload = NULL;
     int original_payloadlen = 0;
@@ -1528,7 +1537,83 @@ static MW_ERROR_NO_T _mqttd_publish_portcfg(MQTTD_CTRL_T *ptr_mqttd,  const DB_R
             cJSON_AddStringToObject(port_setting_entry, "sp", "1000");
         cJSON_AddNumberToObject(port_setting_entry, "du", ptr_port_cfg_info->admin_duplex);
         cJSON_AddNumberToObject(port_setting_entry, "fc_p", ptr_port_cfg_info->admin_flow_ctrl);
+        //cJSON_AddNumberToObject(port_setting_entry, "nv", ptr_port_cfg_info->pvid);
+        //cJSON_AddNumberToObject(port_setting_entry, "vlanlist", ptr_port_cfg_info->vlan_list);
         cJSON_AddNumberToObject(port_setting_entry, "EEE", ptr_port_cfg_info->eee_enable);
+
+        //osapi_printf("vlan %d, vlan list %x", ptr_port_cfg_info->pvid, ptr_port_cfg_info->vlan_list);
+
+	    char *original_payload = cJSON_PrintUnformatted(root);
+	    cJSON_Delete(root);
+		mqtt_free(db_msg);
+
+	    if (original_payload == NULL) {
+	        osapi_printf("Failed to print JSON\n");
+	        return MW_E_NO_MEMORY;
+	    }
+		osapi_printf("portcfg: payload:%s\n", original_payload);
+
+		int original_payloadlen = strlen(original_payload);
+		// Encrypt the payload using RC4
+    	mqttd_rc4_encrypt((unsigned char *)original_payload, original_payloadlen, MQTTD_RC4_KEY, ptr_mqttd->mqtt_buff);
+        mqtt_publish(ptr_mqttd->ptr_client, topic, (const void *)ptr_mqttd->mqtt_buff, original_payloadlen, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)ptr_mqttd);
+		mqtt_free(original_payload); // Free the JSON payload
+        
+        osapi_printf("\nMQTT subscribe event topic with port config done.\n");
+    }
+	return rc;
+}
+
+static MW_ERROR_NO_T _mqttd_publish_vlancfg(MQTTD_CTRL_T *ptr_mqttd,  const DB_REQUEST_TYPE_T *req, const void *ptr_data)
+{
+	MW_ERROR_NO_T rc = MW_E_OK;
+    DB_MSG_T *db_msg = NULL;
+    UI16_T db_size = 0;
+    void *db_data = NULL;
+    DB_PORT_CFG_INFO_T *ptr_port_cfg_info = NULL;
+	osapi_printf("publish portcfg: T/F/E =%u/%u/%u\n", req->t_idx, req->f_idx, req->e_idx);
+	
+    rc = mqttd_queue_getData(PORT_CFG_INFO, DB_ALL_FIELDS, req->e_idx, &db_msg, &db_size, &db_data);
+    if(MW_E_OK == rc)
+    {
+        /* If SUBACK received, then PUBLISH online event */
+        char topic[128];
+        osapi_snprintf(topic, sizeof(topic), "%s/event", ptr_mqttd->topic_prefix);
+        ptr_port_cfg_info = (DB_PORT_CFG_INFO_T *)db_data;
+        osapi_printf("portcfg: db_size:%d\n", db_size);
+        cJSON *root = cJSON_CreateObject();
+        cJSON *data = cJSON_CreateObject();
+        cJSON *port_setting = cJSON_CreateObject();
+        cJSON *port_setting_entry = cJSON_CreateObject();
+        if (root == NULL || data == NULL || port_setting == NULL || port_setting_entry == NULL) {
+            mqttd_debug("Failed to create JSON objects\n");
+            if (root != NULL) cJSON_Delete(root);
+            if (data != NULL) cJSON_Delete(data);
+            if (port_setting != NULL) cJSON_Delete(port_setting);
+            if (port_setting_entry != NULL) cJSON_Delete(port_setting_entry);
+            return MW_E_NO_MEMORY;
+        }
+
+	    cJSON_AddStringToObject(root, "type", "config");
+	    cJSON_AddItemToObject(root, "data", data);
+        cJSON_AddItemToObject(data, "port_setting", port_setting);
+        cJSON_AddItemToArray(port_setting, port_setting_entry);
+        cJSON_AddNumberToObject(port_setting_entry, "id", req->e_idx);
+        cJSON_AddStringToObject(port_setting_entry, "n", "");
+        cJSON_AddNumberToObject(port_setting_entry, "en", ptr_port_cfg_info->admin_status);
+        if(AIR_PORT_SPEED_10M == ptr_port_cfg_info->admin_speed)
+            cJSON_AddStringToObject(port_setting_entry, "sp", "10");
+        else if(AIR_PORT_SPEED_100M == ptr_port_cfg_info->admin_speed)
+            cJSON_AddStringToObject(port_setting_entry, "sp", "100");
+        else if(AIR_PORT_SPEED_1000M == ptr_port_cfg_info->admin_speed)
+            cJSON_AddStringToObject(port_setting_entry, "sp", "1000");
+        cJSON_AddNumberToObject(port_setting_entry, "du", ptr_port_cfg_info->admin_duplex);
+        cJSON_AddNumberToObject(port_setting_entry, "fc_p", ptr_port_cfg_info->admin_flow_ctrl);
+        cJSON_AddNumberToObject(port_setting_entry, "nv", ptr_port_cfg_info->pvid);
+        cJSON_AddNumberToObject(port_setting_entry, "vlanlist", ptr_port_cfg_info->vlan_list);
+        cJSON_AddNumberToObject(port_setting_entry, "EEE", ptr_port_cfg_info->eee_enable);
+
+        osapi_printf("vlan %d, vlan list %x", ptr_port_cfg_info->pvid, ptr_port_cfg_info->vlan_list);
 
 	    char *original_payload = cJSON_PrintUnformatted(root);
 	    cJSON_Delete(root);
@@ -1926,6 +2011,10 @@ _mqttd_listen_db(
 						(void)_mqttd_publish_portcfg(ptr_mqttd, &req, ptr_data);
                         break;
                     case LOGON_INFO:/*not support*/
+                        break;
+
+                    case VLAN_ENTRY:
+                        (void)_mqttd_publish_vlancfg(ptr_mqttd, &req, ptr_data);
                         break;
 						
                     case PORT_MIRROR_INFO:
@@ -2511,6 +2600,64 @@ static void _mqttd_incoming_publish_cb(void *arg, const char *topic, u32_t tot_l
     osapi_strncpy(ptr_mqttd->pub_in_topic, topic, (MQTTD_MAX_TOPIC_SIZE-1));
 }
 
+static MW_ERROR_NO_T _mqttd_handle_setconfig_response(MQTTD_CTRL_T *mqttdctl, cJSON *msgid_obj, MW_ERROR_NO_T resp_rc)
+{
+    MW_ERROR_NO_T rc = MW_E_OK;
+    cJSON *root = NULL;
+    char *original_payload = NULL;
+
+    mqttd_debug("setconfig response send...");
+
+    //create rx json
+    // 创建一个新的 JSON 对象
+    root = cJSON_CreateObject();
+
+    // 添加键值对到 JSON 对象
+    cJSON_AddStringToObject(root, "type", "setConfig");
+    cJSON_AddStringToObject(root, "msg_id", msgid_obj->valuestring);
+    if(resp_rc == MW_E_OK)
+    	cJSON_AddStringToObject(root, "result", "ok");
+	else
+		cJSON_AddStringToObject(root, "result", "error");
+    // 将 JSON 对象转换为字符串
+    original_payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    root = NULL;
+
+    // 打印 JSON 字符串
+    mqttd_debug("Publish RX Topic Message: %s\n", original_payload);
+
+   /* PUBLISH capability with rx topic */
+    char topic[128];
+    osapi_snprintf(topic, sizeof(topic), "%s/rx", mqttdctl->topic_prefix);
+    int original_payloadlen = strlen(original_payload)+1;    
+    if(original_payloadlen > MQTTD_MAX_PACKET_SIZE)
+    {
+        mqttd_debug("Original payload length is too long:%d.", original_payloadlen);
+        goto local_error;
+    }    
+    osapi_memset(mqttdctl->mqtt_buff, 0, MQTTD_MQX_OUTPUT_SIZE);
+    mqttd_rc4_encrypt((unsigned char *)original_payload, original_payloadlen, MQTTD_RC4_KEY, mqttdctl->mqtt_buff);
+    mqtt_publish(mqttdctl->ptr_client, topic, (const void *)mqttdctl->mqtt_buff, original_payloadlen, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)mqttdctl);
+
+    // 释放内存
+    cJSON_free(original_payload); 
+    original_payload= NULL;  
+    return rc;
+
+local_error:
+    if(root) {
+        cJSON_Delete(root);
+        root = NULL;
+    }
+    if(original_payload){
+        cJSON_free(original_payload);     
+        original_payload = NULL;  
+    }
+
+    return MW_E_NO_MEMORY;
+}
+
 static MW_ERROR_NO_T _mqttd_handle_setconfig_device(MQTTD_CTRL_T *mqttdctl, cJSON *data_obj)
 {
     MW_ERROR_NO_T rc = MW_E_OK;
@@ -2925,6 +3072,638 @@ static MW_ERROR_NO_T _mqttd_handle_setconfig_vlan_member(MQTTD_CTRL_T *mqttdctl,
 
 }
 
+static MW_ERROR_NO_T _mqttd_vlan_mode_set(u8_t vlan_mode){
+    MW_ERROR_NO_T rc = MW_E_OK;
+
+    //获取mode
+    DB_MSG_T *ptr_db_msg = NULL;
+    DB_MSG_T *ptr_msg = NULL;
+    u16_t size = 0;
+    u16_t db_size = 0;
+    u16_t i = 0;
+    DB_VLAN_CFG_INFO_T *vlan_cfg = NULL;
+
+    rc = mqttd_queue_getData(VLAN_CFG_INFO, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_db_msg, &db_size, &vlan_cfg);
+    if (MW_E_OK != rc) {
+        mqttd_debug("get org DB vlan cfg info failed(%d)\n", rc);
+        return rc;
+    }
+
+    if((VLAN_PORT_ENABLE == vlan_mode && vlan_cfg->enable_port_b == VLAN_STATE_ENABLE) 
+    || (VLAN_1Q_ENABLE == vlan_mode && vlan_cfg->enable_8021q_b == VLAN_STATE_ENABLE)
+    || (VLAN_MTU_ENABLE == vlan_mode && vlan_cfg->enable_mtu == VLAN_STATE_ENABLE))
+    {
+        MW_FREE(ptr_db_msg);
+        return rc;
+    }
+
+
+    /* Update VLAN_CFG_INFO */
+    if(VLAN_PORT_ENABLE == vlan_mode) /* change to port vlan */
+    {
+        vlan_cfg->enable_port_b = VLAN_STATE_ENABLE;
+        vlan_cfg->enable_8021q_b = VLAN_STATE_DISABLE;
+        vlan_cfg->enable_mtu = VLAN_STATE_DISABLE;
+    }
+    else if(VLAN_1Q_ENABLE == vlan_mode) /* change to 1Q vlan */
+    {
+        vlan_cfg->enable_port_b = VLAN_STATE_DISABLE;
+        vlan_cfg->enable_8021q_b = VLAN_STATE_ENABLE;
+        vlan_cfg->enable_mtu = VLAN_STATE_DISABLE;
+    }
+    else if(VLAN_MTU_ENABLE == vlan_mode) /* change to MTU vlan */
+    {
+        vlan_cfg->enable_port_b = VLAN_STATE_DISABLE;
+        vlan_cfg->enable_8021q_b = VLAN_STATE_DISABLE;
+        vlan_cfg->enable_mtu = VLAN_STATE_ENABLE;
+    }
+
+    //更新mode
+    rc = mqttd_queue_setData(M_UPDATE, VLAN_CFG_INFO, DB_ALL_FIELDS, DB_ALL_ENTRIES, &vlan_cfg, sizeof(DB_VLAN_CFG_INFO_T));
+    //释放消息内存
+    MW_FREE(ptr_db_msg);
+    vlan_cfg = NULL;
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("Update DB vlan cfg info failed(%d)\n", rc);
+        return rc;
+    }
+
+    /* Clear all MAC address table entries when change VLAN mode. */
+    rc = mqttd_queue_setData(M_DELETE, STATIC_MAC_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, NULL, 0);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("Clear all MAC address table entries failed(%d)\n", rc);
+        return rc;
+    }
+    UI32_T plat_max_bitmap = 0;
+    rc = vlan_get_plat_max_portBmp(&plat_max_bitmap);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("Get plat_max_bitmap failed(%d)\n", rc);
+        return rc;
+    }
+
+    /* Create VLAN_ENTRY default VLAN */
+    VLAN_ENTRY_INFO_T vlan_entry = {0};
+    uint16_t defVidx = 0;
+    if(VLAN_PORT_ENABLE == vlan_mode) /* change to port vlan */
+    {
+        vlan_entry.vlan_id = VLAN_DEFAULT_VID;
+        vlan_entry.port_member = plat_max_bitmap;
+    }
+    else if(VLAN_1Q_ENABLE == vlan_mode) /* change to 1Q vlan */
+    {
+        vlan_entry.vlan_id = VLAN_DEFAULT_VID;
+        vlan_entry.untagged_member = plat_max_bitmap;
+        vlan_entry.tagged_member = 0;
+    }
+    else if(VLAN_MTU_ENABLE == vlan_mode) /* change to MTU vlan */
+    {
+        vlan_entry.vlan_id = VLAN_DEFAULT_VID;
+        vlan_entry.port_member = plat_max_bitmap;
+    }
+    rc = mqttd_queue_setData(M_UPDATE, VLAN_ENTRY, DB_ALL_FIELDS, defVidx, &vlan_entry, sizeof(VLAN_ENTRY_INFO_T));
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("Update DB vlan entry failed(%d)\n", rc);
+        return rc;
+    }
+
+    //清空其他VLAN
+    osapi_memset(&vlan_entry, 0, sizeof(vlan_entry));
+    for(defVidx=1; defVidx<MAX_VLAN_ENTRY_NUM; defVidx++){
+        rc = mqttd_queue_setData(M_UPDATE, VLAN_ENTRY, DB_ALL_FIELDS, defVidx, &vlan_entry, sizeof(VLAN_ENTRY_INFO_T));
+        if(MW_E_OK != rc)
+        {
+            mqttd_debug("Update DB vlan entry failed(%d)\n", rc);
+            return rc;
+        }
+    }
+
+
+    if(VLAN_PORT_ENABLE == vlan_mode)
+    {
+        /* Get DB VLAN_ENTRY */
+        DB_VLAN_ENTRY_T *ptr_vlan_entry_tbl = NULL;
+        rc = mqttd_queue_getData(VLAN_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_msg, &size, (void **)&ptr_vlan_entry_tbl);
+        if(MW_E_OK != rc)
+        {
+            mqttd_debug("get org DB vlan entry failed(%d)\n", rc);
+            return rc;
+        }
+        /* Update VLAN_ENTRY */
+        for(i = 1; i < PLAT_MAX_PORT_NUM; i++)
+        {
+            ptr_vlan_entry_tbl->vlan_id[i] = (i+1);
+            ptr_vlan_entry_tbl->port_member[i] = 0;
+        }
+        rc = mqttd_queue_setData(M_UPDATE, VLAN_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, ptr_vlan_entry_tbl, sizeof(DB_VLAN_ENTRY_T));
+        MW_FREE(ptr_msg);
+        if(MW_E_OK != rc)
+        {
+            return rc;
+        }
+    }
+
+    if((VLAN_1Q_ENABLE == vlan_mode) || (VLAN_PORT_ENABLE == vlan_mode))
+    {
+        /* Update PORT_ISOLATION */
+        for(i = 0; i < PLAT_MAX_PORT_NUM; i++)
+        {
+            UI32_T  ptr_isolation = plat_max_bitmap;
+            rc = mqttd_queue_setData(M_UPDATE, PORT_CFG_INFO, PORT_ISOLATION, DB_ALL_ENTRIES, &ptr_isolation, (sizeof(UI32_T)));
+            if(MW_E_OK != rc)
+            {
+                mqttd_debug("Update DB port isolation failed(%d)\n", rc);
+                return rc;
+            }
+        }
+
+    }
+
+    if(VLAN_MTU_ENABLE == vlan_mode)
+    {
+        /* Update PORT_ISOLATION */
+        UI32_T *ptr_isolation_tbl = NULL;
+        u8_t default_uplink_port_idx = 0;
+        rc = osapi_calloc((sizeof(UI32_T) * PLAT_MAX_PORT_NUM), MQTTD_TASK_NAME, (void **)&ptr_isolation_tbl);
+        if(MW_E_OK != rc)
+        {
+            mqttd_debug("osapi_calloc failed(%d)\n", rc);
+            return rc;
+        }
+        for(i = 0; i < PLAT_MAX_PORT_NUM; i++)
+        {
+            if(default_uplink_port_idx == i)
+            {
+                ptr_isolation_tbl[i] = plat_max_bitmap;
+            }
+            else
+            {
+                ptr_isolation_tbl[i] = ((1 << (i+1)) | (1 << (default_uplink_port_idx+1)));
+            }
+        }
+        /* If any porttrunk exists */
+        DB_TRUNK_PORT_T *ptr_trunk = NULL;
+        u8_t tid = 0;
+        rc = mqttd_queue_getData(TRUNK_PORT, TRUNK_MEMBERS, DB_ALL_ENTRIES, &ptr_msg, &size, (void **)&ptr_trunk);
+        if(MW_E_OK != rc)
+        {
+            mqttd_debug("mqttd_queue_getData failed(%d)\n", rc);
+            return rc;
+        }
+        for(tid = 0; tid < MAX_TRUNK_NUM; tid++)
+        {
+            if (0 != (ptr_trunk->members[tid] & 0x1))
+            {
+                BITMAP_PORT_FOREACH(ptr_trunk->members[tid], i)
+                {
+                    ptr_isolation_tbl[i] = plat_max_bitmap;
+                }
+            }
+        }
+        MW_FREE(ptr_msg);
+        rc = mqttd_queue_setData(M_UPDATE, PORT_CFG_INFO, PORT_ISOLATION, DB_ALL_ENTRIES, ptr_isolation_tbl, (sizeof(UI32_T) * PLAT_MAX_PORT_NUM));
+        MW_FREE(ptr_isolation_tbl);
+        if(MW_E_OK != rc)
+        {
+            mqttd_debug("mqttd_queue_setData failed(%d)\n", rc);
+            return rc;
+        }
+    }
+
+    if((VLAN_MTU_ENABLE == vlan_mode) || (VLAN_PORT_ENABLE == vlan_mode))
+    {
+        /* Update PORT_PVID */
+        UI16_T *ptr_pvid_tbl = NULL;
+        rc = osapi_calloc((sizeof(UI16_T) * PLAT_MAX_PORT_NUM), MQTTD_TASK_NAME, (void **)&ptr_pvid_tbl);
+        if(MW_E_OK != rc)
+        {
+            mqttd_debug("osapi_calloc failed(%d)\n", rc);
+            return rc;
+        }
+        for(i = 0; i < PLAT_MAX_PORT_NUM; i++)
+        {
+            ptr_pvid_tbl[i] = VLAN_DEFAULT_VID;
+        }
+
+        rc = mqttd_queue_setData(M_UPDATE, PORT_CFG_INFO, PORT_PVID, DB_ALL_ENTRIES, ptr_pvid_tbl, (sizeof(UI16_T) * PLAT_MAX_PORT_NUM));
+        MW_FREE(ptr_pvid_tbl);
+        if(MW_E_OK != rc)
+        {
+            mqttd_debug("mqttd_queue_setData failed(%d)\n", rc);
+            return rc;
+        }
+
+        /* Update PORT_VLAN_IG_FILTER */
+        UI8_T *ptr_incheck_tbl = NULL;
+        rc = osapi_calloc((sizeof(UI8_T) * PLAT_MAX_PORT_NUM), MQTTD_TASK_NAME, (void **)&ptr_incheck_tbl);
+        if(MW_E_OK != rc)
+        {
+            mqttd_debug("osapi_calloc failed(%d)\n", rc);
+            return rc;
+        }
+        for(i = 0; i < PLAT_MAX_PORT_NUM; i++)
+        {
+            ptr_incheck_tbl[i] = 0;
+        }
+
+        rc = mqttd_queue_setData(M_UPDATE, PORT_CFG_INFO, PORT_VLAN_IG_FILTER, DB_ALL_ENTRIES, ptr_incheck_tbl, (sizeof(UI8_T) * PLAT_MAX_PORT_NUM));
+        MW_FREE(ptr_incheck_tbl);
+        if(MW_E_OK != rc)
+        {
+            return rc;
+        }
+    }
+    return rc;
+}
+
+
+//如果存在vlan idx 则增量添加端口，不存在则增加vlan entry
+static MW_ERROR_NO_T _mqttd_vlan_entry_add(VLAN_ENTRY_INFO_T *ptr_vlan_entry, u16_t *ptr_vidx){
+    MW_ERROR_NO_T rc = MW_E_OK;
+    DB_VLAN_ENTRY_T *ptr_vlan_entry_tbl = NULL;
+    DB_MSG_T *ptr_msg = NULL;
+    UI16_T size = 0;
+    u16_t vidx = 0; 
+    u32_t tmp_bpm = 0;
+    u8_t i = 0;
+    u8_t port = 0;
+    VLAN_ENTRY_INFO_T vlan_entry = {0};
+
+    *ptr_vidx = 0;
+    /* Get DB VLAN_ENTRY */
+    rc = mqttd_queue_getData(VLAN_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_msg, &size, (void **)&ptr_vlan_entry_tbl);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("get vlan cfg failed(%d)\n", rc);
+        return rc;
+    }
+
+    //更新vlan配置
+    for(i = 0; i < MAX_VLAN_ENTRY_NUM; i++)
+    {
+        if(ptr_vlan_entry->vlan_id == ptr_vlan_entry_tbl->vlan_id[i]){
+            //TODO: 这里是直接覆盖原有entry，可能后续需要保留原始tagmember            
+            vidx = i;
+            for(port=0; port < PLAT_MAX_PORT_NUM; port++){
+                tmp_bpm = 1 << port;
+                if(ptr_vlan_entry->port_member & tmp_bpm){
+                    ptr_vlan_entry_tbl->port_member[i] |= tmp_bpm;
+                }
+                if(ptr_vlan_entry->tagged_member & tmp_bpm){
+                    ptr_vlan_entry_tbl->tagged_member[i] |= tmp_bpm;
+                }
+                if(ptr_vlan_entry->untagged_member & tmp_bpm){
+                    ptr_vlan_entry_tbl->untagged_member[i] |= tmp_bpm;
+                }
+            }
+            vlan_entry.vlan_id = ptr_vlan_entry_tbl->vlan_id[i];
+            vlan_entry.port_member = ptr_vlan_entry_tbl->port_member[i];
+            vlan_entry.tagged_member = ptr_vlan_entry_tbl->tagged_member[i];
+            vlan_entry.untagged_member = ptr_vlan_entry_tbl->untagged_member[i];
+            break;
+        }        
+    }
+    
+    if(vidx >= MAX_VLAN_ENTRY_NUM){
+        MW_FREE(ptr_msg);
+        mqttd_debug("vlan entry full\n");
+        return MW_E_TABLE_FULL;
+    }
+    
+    if(vidx == 0){
+        vlan_entry = *ptr_vlan_entry;
+    }
+
+    //释放数据指针
+    MW_FREE(ptr_msg);
+    ptr_msg = NULL;
+    ptr_vlan_entry_tbl = NULL;
+
+
+    //不存在则增加在 0 位置
+    rc = mqttd_queue_setData(M_UPDATE, VLAN_ENTRY, DB_ALL_FIELDS, vidx, &vlan_entry, sizeof(VLAN_ENTRY_INFO_T));
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("set vlan cfg failed(%d)\n", rc);
+        return rc;
+    }
+    *ptr_vidx = vidx;
+    return rc;
+}
+
+static MW_ERROR_NO_T _mqttd_port_native_vlan_set(VLAN_ENTRY_INFO_T *vlan_entry){
+    MW_ERROR_NO_T rc = MW_E_OK;
+    DB_MSG_T *ptr_msg = NULL;
+    u16_t vidx = 0; 
+    u16_t i = 0; 
+    UI32_T vlan_bmp = 0; 
+    UI32_T tmp_bmp = 0;   
+    UI16_T size = 0;
+    UI16_T *ptr_pvid_tbl = NULL;
+    
+    //根据vlan id 找到vlan idx，没有则增加，同时更新vlan entry中的端口掩码
+    rc = _mqttd_vlan_entry_add(vlan_entry, &vidx);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("get vlan idx failed(%d)\n", rc);
+        return rc;
+    }
+
+    //获取端口native vlan
+    rc = mqttd_queue_getData(PORT_CFG_INFO, PORT_PVID, DB_ALL_ENTRIES, &ptr_msg, &size, (void **)&ptr_pvid_tbl);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("get port native vlan failed(%d)\n", rc);
+        return rc;
+    }    
+
+    BITMAP_PORT_FOREACH(vlan_entry->port_member, i)
+    {
+        ptr_pvid_tbl[i] = vlan_entry->vlan_id;
+    }
+
+    rc = mqttd_queue_setData(M_UPDATE, PORT_CFG_INFO, PORT_PVID, DB_ALL_ENTRIES, ptr_pvid_tbl, (sizeof(UI16_T) * PLAT_MAX_PORT_NUM));
+    MW_FREE(ptr_msg);
+    ptr_msg = NULL;
+    if(MW_E_OK != rc)
+    {
+        return rc;
+    }
+    return rc;
+}
+
+//根据vlan 更新port vlan list
+static MW_ERROR_NO_T _mqttd_port_base_vlan_set(VLAN_ENTRY_INFO_T *vlan_entry){
+    MW_ERROR_NO_T rc = MW_E_OK;
+    DB_VLAN_ENTRY_T *ptr_vlan_entry_tbl = NULL;
+    DB_MSG_T *ptr_msg = NULL;
+    u16_t vidx = 0; 
+    UI32_T vlan_bmp = 0; 
+    UI32_T tmp_bmp = 0;   
+    UI16_T size = 0;
+    u8_t i = 0;
+    UI32_T *ptr_vlan_list_tbl = NULL;
+    UI32_T *ptr_port_matrix_tbl = NULL;
+
+    /* Get DB VLAN_ENTRY */
+    rc = _mqttd_vlan_entry_add(vlan_entry, &vidx);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("add vlan idx failed(%d)\n", rc);
+        return rc;
+    }
+
+    /* Get DB PORT_VLAN_LIST */
+    rc = mqttd_queue_getData(PORT_CFG_INFO, PORT_VLAN_LIST, DB_ALL_ENTRIES, &ptr_msg, &size, (void **)&ptr_vlan_list_tbl);
+    if(MW_E_OK != rc)
+    {
+        return rc;
+    }
+
+    //更新vlan bmp
+    vlan_bmp = 1<<vidx;
+    for(i = 0; i < PLAT_MAX_PORT_NUM; i++)
+    {
+        if(PLAT_CPU_PORT == i)
+        {
+            continue;
+        }
+        if(vlan_entry->port_member & (1 << i))
+        {
+            //将vlan entry idx 置入port vlan list
+            SET_BIT(ptr_vlan_list_tbl[i], vidx);
+        }
+        if(vlan_entry->tagged_member & (1 << i))
+        {
+            //将vlan entry idx 置入port vlan list
+            SET_BIT(ptr_vlan_list_tbl[i], vidx);
+        }
+        if(vlan_entry->untagged_member & (1 << i))
+        {
+            //将vlan entry idx 置入port vlan list
+            SET_BIT(ptr_vlan_list_tbl[i], vidx);
+        }
+    }
+    rc = mqttd_queue_setData(M_UPDATE, PORT_CFG_INFO, PORT_VLAN_LIST, DB_ALL_ENTRIES, ptr_vlan_list_tbl, sizeof(UI32_T) * PLAT_MAX_PORT_NUM);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("set vlan cfg failed(%d)\n", rc);
+        MW_FREE(ptr_msg);     
+        return rc;
+    }
+    //释放数据指针
+    MW_FREE(ptr_msg);
+    ptr_msg = NULL;
+    ptr_vlan_list_tbl = NULL;
+
+    /* TODO: 确认端口隔离是否需要 
+    //设置 port isolate 状态
+    rc = mqttd_queue_getData(PORT_CFG_INFO, PORT_ISOLATION, DB_ALL_ENTRIES, &ptr_msg, &size, (void **)&ptr_port_matrix_tbl);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("get vlan cfg failed(%d)\n", rc);
+        return rc;
+    }
+
+    BITMAP_PORT_FOREACH(vlan_entry->port_member, i)
+    {
+        if(PLAT_CPU_PORT == i)
+        {
+            continue;
+        }
+        ptr_port_matrix_tbl[i-1] |= vlan_entry->port_member;
+    }
+
+    rc = mqttd_queue_setData(M_UPDATE, PORT_CFG_INFO, PORT_ISOLATION, DB_ALL_ENTRIES, ptr_port_matrix_tbl, (sizeof(UI32_T) * PLAT_MAX_PORT_NUM));
+    if(MW_E_OK != rc){
+        mqttd_debug("set vlan cfg failed(%d)\n", rc);
+        MW_FREE(ptr_msg);
+        return rc;
+    }   
+    //释放数据指针
+    MW_FREE(ptr_msg);
+    ptr_msg = NULL;
+    ptr_port_matrix_tbl = NULL;
+    */
+
+    return rc;
+}
+
+static MW_ERROR_NO_T _mqttd_handle_setconfig_access_vlan_process(MQTTD_CTRL_T *mqttdctl, cJSON *data_obj){
+    MW_ERROR_NO_T rc = MW_E_OK;
+    cJSON *vlan_setting_obj;
+    int idx = 0;
+    VLAN_ENTRY_INFO_T vlan_entry = {0};
+    
+    //获取消息中的vlan 配置
+    cJSON_ArrayForEach(vlan_setting_obj, data_obj) {
+        if (cJSON_IsObject(vlan_setting_obj) && idx < MAX_VLAN_ENTRY_NUM) {
+            // 获取 p 数组
+            cJSON *p = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "p");
+            if (cJSON_IsArray(p)) {
+                cJSON *port;
+                cJSON_ArrayForEach(port, p) {
+                    vlan_entry.port_member |= (1 << port->valueint);
+                }
+            }
+
+            // 获取 ty 字段
+            cJSON *ty = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "ty");
+            if (cJSON_IsNumber(ty)) {
+                if(MQTTD_PORT_VLAN_ACCESS != ty->valueint){
+                    continue;
+                }
+            }            
+
+            // 获取 ac 字段
+            cJSON *ac = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "ac");
+            if (cJSON_IsNumber(ac)) {
+                vlan_entry.vlan_id = ac->valueint;
+            }            
+            
+            //设置端口
+            rc = _mqttd_port_base_vlan_set(&vlan_entry);
+            if(MW_E_OK != rc){
+                mqttd_debug("set vlan cfg failed(%d)\n", rc);
+                return rc;
+            }
+        }
+    }
+    return rc;
+}
+
+
+static MW_ERROR_NO_T _mqttd_handle_setconfig_trunk_vlan_process(MQTTD_CTRL_T *mqttdctl, cJSON *data_obj){
+    MW_ERROR_NO_T rc = MW_E_OK;
+    cJSON *vlan_setting_obj;
+    int idx = 0;
+    VLAN_ENTRY_INFO_T vlan_entry = {0};
+    
+    //获取消息中的vlan 配置
+    cJSON_ArrayForEach(vlan_setting_obj, data_obj) {
+        vlan_entry.port_member = 0;
+        if (cJSON_IsObject(vlan_setting_obj) && idx < MAX_VLAN_ENTRY_NUM) {
+            // 获取 p 数组
+            cJSON *p = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "p");
+            if (cJSON_IsArray(p)) {
+                cJSON *port;
+                cJSON_ArrayForEach(port, p) {
+                    vlan_entry.port_member |= (1 << port->valueint);
+                }
+            }
+
+            // 获取 ty 字段
+            cJSON *ty = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "ty");
+            if (cJSON_IsNumber(ty)) {
+                if(MQTTD_PORT_VLAN_TRUNK != ty->valueint){
+                    continue;
+                }
+            }    
+
+            // 获取 nv 字段
+            cJSON *nv = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "nv");
+            if (cJSON_IsNumber(nv)) {
+                //TODO:暂定nv 是 native vlan
+                vlan_entry.vlan_id = nv->valueint;
+                //设置端口
+                rc = _mqttd_port_native_vlan_set(&vlan_entry);
+                if(MW_E_OK != rc){
+                    mqttd_debug("set native vlan failed(%d)\n", rc);
+                    return rc;
+                }
+            }
+
+            // 获取 pv 数组
+            cJSON *pv = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "pv");
+            if (cJSON_IsArray(pv)) {
+                cJSON *value;
+                cJSON_ArrayForEach(value, pv) {
+                    //TODO:暂定 pv 是port vlan,写入vlanlsit
+                    vlan_entry.vlan_id = value->valueint;
+                    rc = _mqttd_port_base_vlan_set(&vlan_entry);
+                    if(MW_E_OK != rc){
+                        mqttd_debug("set vlan cfg failed(%d)\n", rc);
+                        return rc;
+                    }
+                }
+            }
+        }
+    }
+    return rc;
+}
+
+static MW_ERROR_NO_T _mqttd_handle_setconfig_hybrid_vlan_process(MQTTD_CTRL_T *mqttdctl, cJSON *data_obj){
+    MW_ERROR_NO_T rc = MW_E_OK;
+    cJSON *vlan_setting_obj;
+    int idx = 0;
+    u8_t port_id = 0;
+    u8_t i = 0;
+    u8_t vidx = 0;
+    /*db variable*/
+    DB_MSG_T *ptr_msg = NULL;
+    UI16_T size = 0;
+    VLAN_ENTRY_INFO_T vlan_entry = {0};
+    
+    //获取消息中 端口的vlan 配置
+    cJSON_ArrayForEach(vlan_setting_obj, data_obj) {
+        if (cJSON_IsObject(vlan_setting_obj) && idx < MAX_VLAN_ENTRY_NUM) {
+            // 获取 id 字段
+            cJSON *id = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "id");
+            if (cJSON_IsNumber(id)) {
+                port_id = id->valueint;
+            }
+
+            // 获取 n 字段
+            cJSON *n = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "n");
+            if (cJSON_IsString(n) && (n->valuestring != NULL)) {
+                //TODO: 端口desc作用
+            }
+
+            // 获取 ty 字段
+            cJSON *ty = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "ty");
+            if (cJSON_IsNumber(ty)) {
+                if(MQTTD_PORT_VLAN_HYBRID != ty->valueint){
+                    continue;
+                }
+            }   
+
+            // 获取 tv 数组
+            cJSON *tv = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "tv");
+            if (cJSON_IsArray(tv)) {
+                cJSON *value;
+                SET_BIT(vlan_entry.tagged_member, port_id);
+                cJSON_ArrayForEach(value, tv) {
+                    vlan_entry.vlan_id = value->valueint;
+                    rc = _mqttd_port_base_vlan_set(&vlan_entry);
+                    if(MW_E_OK != rc){
+                        mqttd_debug("set vlan cfg failed(%d)\n", rc);
+                        return rc;
+                    }
+                }
+            }
+
+            // 获取 utv 数组
+            cJSON *utv = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "utv");
+            if (cJSON_IsArray(utv)) {
+                cJSON *value;
+                SET_BIT(vlan_entry.untagged_member, port_id);
+                cJSON_ArrayForEach(value, utv) {
+                    vlan_entry.vlan_id = value->valueint;
+                    rc = _mqttd_port_base_vlan_set(&vlan_entry);
+                    if(MW_E_OK != rc){
+                        mqttd_debug("set vlan cfg failed(%d)\n", rc);
+                        return rc;
+                    }
+                }
+            }
+        }
+    }
+    return rc;
+}
+
 static MW_ERROR_NO_T _mqttd_handle_setconfig_vlan_setting(MQTTD_CTRL_T *mqttdctl, cJSON *data_obj)
 {
     MW_ERROR_NO_T rc = MW_E_OK;
@@ -2932,32 +3711,54 @@ static MW_ERROR_NO_T _mqttd_handle_setconfig_vlan_setting(MQTTD_CTRL_T *mqttdctl
     DB_MSG_T *ptr_db_msg = NULL;
     u16_t db_size = 0;
     void *db_data = NULL;
-
+    u8_t type = 0;
     cJSON *vlan_setting_obj;
     int idx = 0;
-    memset(&vlan_info, 0, sizeof(DB_VLAN_ENTRY_T));
-    rc = mqttd_queue_getData(VLAN_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_db_msg, &db_size, &db_data);
-    if (MW_E_OK != rc) {
-        mqttd_debug("get org DB vlan_info failed(%d)\n", rc);
+
+    //设置vlan mode
+    rc =_mqttd_vlan_mode_set(VLAN_1Q_ENABLE);
+    if(MW_E_OK != rc){
+        mqttd_debug("set vlan mode failed(%d)\n", rc);
         return rc;
     }
-    memcpy(&vlan_info, db_data, sizeof(DB_VLAN_ENTRY_T));
-    mqtt_free(ptr_db_msg);
 
+    //获取vlantype
     cJSON_ArrayForEach(vlan_setting_obj, data_obj) {
         if (cJSON_IsObject(vlan_setting_obj) && idx < MAX_VLAN_ENTRY_NUM) {
-			//
-            idx++;
+            // 获取 ty 字段 type
+            cJSON *ty = cJSON_GetObjectItemCaseSensitive(vlan_setting_obj, "ty");
+            if (cJSON_IsNumber(ty)) {
+                type = ty->valueint;
+                break;
+            }else{
+                mqttd_debug("ty is not number\n");
+                return MW_E_BAD_PARAMETER;
+            }
+            mqttd_debug("get type failed\n");
         }
     }
-    
-    rc = mqttd_queue_setData(M_UPDATE, VLAN_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, &vlan_info, sizeof(vlan_info));
-    if (MW_E_OK != rc) {
-        mqttd_debug("Update DB vlan_info failed(%d)\n", rc);
-    }
-    return rc;
 
+    if(MQTTD_PORT_VLAN_ACCESS == type){
+        //access vlan
+        rc = _mqttd_handle_setconfig_access_vlan_process(mqttdctl, data_obj);
+    }
+    else if(MQTTD_PORT_VLAN_TRUNK == type){
+        //trunk vlan
+        rc = _mqttd_handle_setconfig_trunk_vlan_process(mqttdctl, data_obj);
+    }
+    else if (MQTTD_PORT_VLAN_HYBRID == type)
+    {
+        // hybrid vlan
+        rc = _mqttd_handle_setconfig_hybrid_vlan_process(mqttdctl, data_obj);
+    }
+    else {
+        mqttd_debug("type is not support\n");
+        return MW_E_BAD_PARAMETER;    
+    }
+
+    return rc;    
 }
+
 
 static MW_ERROR_NO_T _mqttd_handle_setconfig_jumbo_frame(MQTTD_CTRL_T *mqttdctl, cJSON *data_obj)
 {
@@ -2986,7 +3787,6 @@ static MW_ERROR_NO_T _mqttd_handle_setconfig_jumbo_frame(MQTTD_CTRL_T *mqttdctl,
         mqttd_debug("Update DB jumbo_frame_info failed(%d)\n", rc);
     }
     return rc;
-
 }
 
 static MW_ERROR_NO_T _mqttd_handle_rules_data(MQTTD_CTRL_T *mqttdctl,  cJSON *data_obj)
@@ -3113,9 +3913,9 @@ static MW_ERROR_NO_T _mqttd_handle_setconfig_data(MQTTD_CTRL_T *mqttdctl,  cJSON
             }
         } 
     }
-
 	return rc;
 }
+
 static MW_ERROR_NO_T _mqttd_handle_capability(MQTTD_CTRL_T *mqttdctl,  cJSON *msgid_obj)
 {
     MW_ERROR_NO_T rc = MW_E_OK;
@@ -3579,6 +4379,276 @@ static MW_ERROR_NO_T _mqttd_handle_getconfig_jumbo_frame(MQTTD_CTRL_T *mqttdctl,
 	return rc;
 }
 
+static MW_ERROR_NO_T _mqttd_handle_getconfig_vlan_setting(MQTTD_CTRL_T *mqttdctl, cJSON *data_obj)
+{
+    MW_ERROR_NO_T rc = MW_E_OK;
+	DB_VLAN_ENTRY_T *ptr_vlan_entry_tbl = NULL;
+    UI32_T *ptr_vlan_list_tbl = NULL;
+    u16_t vlan1_id[MAX_VLAN_ENTRY_NUM] = {0};
+    u16_t vlan2_id[MAX_VLAN_ENTRY_NUM] = {0};
+    u8_t vlan1_cnt = 0;
+    u8_t vlan2_cnt = 0;
+    UI16_T *ptr_pvid_tbl= NULL;
+    DB_MSG_T *ptr_vlan_msg = NULL;
+    DB_MSG_T *ptr_vlan_list_msg = NULL;
+    DB_MSG_T *ptr_pvid_msg = NULL;
+    u16_t pvid = 0;
+    u16_t size = 0;
+    u8_t port_id = 0, j = 0;
+    u8_t port_vlan_type = MQTTD_PORT_VLAN_NONE;
+    char port_id_str[8] = {0};
+
+    /* Get DB VLAN_ENTRY */
+    rc = mqttd_queue_getData(VLAN_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_vlan_msg, &size, (void **)&ptr_vlan_entry_tbl);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("get vlan cfg failed(%d)\n", rc);
+        goto GET_MSG_FREE;
+    }
+
+    /* Get DB PORT_VLAN_LIST */
+    rc = mqttd_queue_getData(PORT_CFG_INFO, PORT_VLAN_LIST, DB_ALL_ENTRIES, &ptr_vlan_list_msg, &size, (void **)&ptr_vlan_list_tbl);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("get port vlan list failed(%d)\n", rc);
+        goto GET_MSG_FREE;
+    }
+
+    /* Get DB port native vlan */
+    rc = mqttd_queue_getData(PORT_CFG_INFO, PORT_PVID, DB_ALL_ENTRIES, &ptr_pvid_msg, &size, (void **)&ptr_pvid_tbl);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("get port native vlan failed(%d)\n", rc);
+        goto GET_MSG_FREE;
+    }
+
+    // 创建 vlan_member 数组
+    cJSON *vlan_setting = cJSON_CreateArray();
+    if (vlan_setting == NULL)
+    {
+        mqttd_debug("Failed to create JSON array for vlan setting.");
+        rc = MW_E_NO_MEMORY;
+        goto GET_MSG_FREE;
+    }
+    cJSON *member = NULL;
+
+    //获取端口的vlan信息
+    for(port_id = 0; port_id < PLAT_MAX_PORT_NUM; port_id++)
+    {
+        if(PLAT_CPU_PORT == port_id)
+        {
+            continue;
+        }
+
+        //端口不存在vlan配置则查找下一个
+        if((VLAN_DEFAULT_VID == ptr_pvid_tbl[port_id])
+        && (0 == ptr_vlan_list_tbl[port_id]))
+        {
+            continue;
+        }
+
+        osapi_memset(port_id_str, 0, sizeof(port_id_str));
+        osapi_sprintf(port_id_str, sizeof(port_id_str), "port%d", port_id);
+        port_vlan_type = MQTTD_PORT_VLAN_NONE;
+        if(VLAN_DEFAULT_VID != ptr_pvid_tbl[port_id]){
+            port_vlan_type = MQTTD_PORT_VLAN_ACCESS;
+        }
+
+        if(0 != ptr_vlan_list_tbl[port_id]){
+            vlan1_cnt = 0;
+            vlan2_cnt = 0;
+            BITMAP_VLAN_FOREACH(ptr_vlan_list_tbl[port_id], j){
+                if(ptr_vlan_entry_tbl->vlan_id[j] != 0) {
+                    if(ptr_vlan_entry_tbl->port_member[j] & (1 << port_id)){
+                        vlan1_id[vlan1_cnt] = ptr_vlan_entry_tbl->vlan_id[j];
+                        vlan1_cnt++;
+                        continue;
+                    }
+                    if(ptr_vlan_entry_tbl->tagged_member[j] & (1 << port_id)){
+                        vlan1_id[vlan1_cnt] = ptr_vlan_entry_tbl->vlan_id[j];
+                        vlan1_cnt++;                        
+                    }
+                    if(ptr_vlan_entry_tbl->untagged_member[j] & (1 << port_id))
+                    {
+                        vlan2_id[vlan2_cnt] = ptr_vlan_entry_tbl->vlan_id[j];
+                        vlan2_cnt++;
+                    }
+                }
+            } 
+            if(vlan2_cnt > 0){
+                port_vlan_type = MQTTD_PORT_VLAN_HYBRID;
+            }else{
+                port_vlan_type = MQTTD_PORT_VLAN_TRUNK;
+            }           
+        }
+
+        // 创建第一个对象并添加到数组
+        member = cJSON_CreateObject();
+        if (member == NULL)
+        {
+            mqttd_debug("Failed to create JSON object for vlan member.");
+            rc = MW_E_NO_MEMORY;
+            goto GET_MSG_FREE;
+        }
+
+        cJSON_AddNumberToObject(member, "id", port_id);        
+        cJSON_AddStringToObject(member, "n", port_id_str);
+        cJSON_AddNumberToObject(member, "ty", port_vlan_type);
+        if(port_vlan_type == MQTTD_PORT_VLAN_ACCESS){
+            cJSON_AddNumberToObject(member, "ac", ptr_pvid_tbl[port_id]);
+            if(false == cJSON_AddItemToArray(vlan_setting, member)) {
+                mqttd_debug("Failed to add vlan ac member to array.");
+                rc = MW_E_NO_MEMORY;
+                goto GET_MSG_FREE;
+            }
+        }
+        else if(port_vlan_type == MQTTD_PORT_VLAN_TRUNK){
+            cJSON_AddNumberToObject(member, "nv", ptr_pvid_tbl[port_id]);
+            cJSON * pv = cJSON_CreateArray();
+            if(NULL == pv){
+                mqttd_debug("Failed to create JSON array for vlan pv.");
+                rc = MW_E_NO_MEMORY;
+                goto GET_MSG_FREE;
+            }
+
+            for(j = 0; j < vlan1_cnt; j++)
+            {
+                cJSON_AddItemToArray(pv, vlan1_id[j]);
+            }
+
+            if(false == cJSON_AddItemToObject(member, "pv", pv)) {
+                mqttd_debug("Failed to add vlan pv member to array.");
+                rc = MW_E_NO_MEMORY;
+                cJSON_Delete(pv);
+                goto GET_MSG_FREE;
+            }
+
+            if(false == cJSON_AddItemToArray(vlan_setting, member)) {
+                mqttd_debug("Failed to add vlan tk member to array.");
+                rc = MW_E_NO_MEMORY;
+                goto GET_MSG_FREE;
+            }
+        }
+        else{
+            cJSON * tv= cJSON_CreateArray();
+            if(NULL == tv){
+                mqttd_debug("Failed to create JSON array for vlan tv.");
+                rc = MW_E_NO_MEMORY;
+                goto GET_MSG_FREE;
+            }
+
+            for(j = 0; j < vlan1_cnt; j++)
+            {
+                cJSON_AddItemToArray(tv, vlan1_id[j]);
+            }
+
+            if(false == cJSON_AddItemToObject(member, "tv", tv)) {
+                mqttd_debug("Failed to add vlan tv member to array.");
+                rc = MW_E_NO_MEMORY;
+                cJSON_Delete(tv);
+                goto GET_MSG_FREE;
+            }
+
+            cJSON * utv= cJSON_CreateArray();
+            if(NULL == utv){
+                mqttd_debug("Failed to create JSON array for vlan utv.");
+                rc = MW_E_NO_MEMORY;
+                goto GET_MSG_FREE;
+            }
+
+            for(j = 0; j < vlan2_cnt; j++)
+            {
+                cJSON_AddItemToArray(utv, vlan2_id[j]);
+            }
+
+            if(false == cJSON_AddItemToObject(member, "utv", utv)) {
+                mqttd_debug("Failed to add vlan utv member to array.");
+                rc = MW_E_NO_MEMORY;
+                cJSON_Delete(utv);
+                goto GET_MSG_FREE;
+            }
+
+            if(false == cJSON_AddItemToArray(vlan_setting, member)) {
+                mqttd_debug("Failed to add vlan hy member to array.");
+                rc = MW_E_NO_MEMORY;
+                goto GET_MSG_FREE;
+            }   
+        }
+        member = NULL;        
+    }
+
+    cJSON_AddItemToObject(data_obj, "vlan_setting", vlan_setting);
+    vlan_setting = NULL;
+
+GET_MSG_FREE:
+    if(ptr_vlan_msg){
+        MW_FREE(ptr_vlan_msg);
+        ptr_vlan_msg = NULL;
+    }
+    if(ptr_vlan_list_msg){
+        MW_FREE(ptr_vlan_list_msg);
+        ptr_vlan_list_msg = NULL;
+    }
+    if(ptr_pvid_msg){
+        MW_FREE(ptr_pvid_msg);
+        ptr_pvid_msg = NULL;
+    }
+    if(vlan_setting){
+        cJSON_Delete(vlan_setting);
+        vlan_setting = NULL;
+    }
+    if(member){
+        cJSON_Delete(member);
+        member = NULL;
+    }
+    return rc;
+}
+
+static MW_ERROR_NO_T _mqttd_handle_getconfig_vlan_member(MQTTD_CTRL_T *mqttdctl, cJSON *data_obj)
+{
+    MW_ERROR_NO_T rc = MW_E_OK;
+	DB_VLAN_ENTRY_T *ptr_vlan_entry_tbl = NULL;
+    DB_MSG_T *ptr_msg = NULL;
+    u16_t size = 0;
+    u8_t i = 0;
+
+    /* Get DB VLAN_ENTRY */
+    rc = mqttd_queue_getData(VLAN_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_msg, &size, (void **)&ptr_vlan_entry_tbl);
+    if(MW_E_OK != rc)
+    {
+        mqttd_debug("get vlan cfg failed(%d)\n", rc);
+        return rc;
+    }
+
+    // 创建 vlan_member 数组
+    cJSON *vlan_member = cJSON_CreateArray();
+
+    //更新vlan配置
+    for(i = 0; i < MAX_VLAN_ENTRY_NUM; i++)
+    {
+        mqttd_debug("vlan_id:%d  %x %x %x \n", ptr_vlan_entry_tbl->vlan_id[i], ptr_vlan_entry_tbl->port_member[i], ptr_vlan_entry_tbl->tagged_member[i], ptr_vlan_entry_tbl->untagged_member[i]);
+        if(ptr_vlan_entry_tbl[i].vlan_id == 0) {
+            continue;
+        }
+        // 创建第一个对象并添加到数组
+        cJSON *member1 = cJSON_CreateObject();
+        cJSON_AddNumberToObject(member1, "id", (double)ptr_vlan_entry_tbl->vlan_id[i]);
+        if(false == cJSON_AddItemToArray(vlan_member, member1)){
+            mqttd_debug("Failed to add vlan member to array.");
+            cJSON_Delete(member1);
+            cJSON_Delete(vlan_member);
+            MW_FREE(ptr_msg);
+            return MW_E_NO_MEMORY;
+        }
+    }
+
+    cJSON_AddItemToObject(data_obj, "vlan_member", vlan_member);
+    MW_FREE(ptr_msg);
+    ptr_msg = NULL;
+    ptr_vlan_entry_tbl = NULL;
+	return rc;
+}
+
 static MW_ERROR_NO_T _mqttd_handle_getconfig_data(MQTTD_CTRL_T *mqttdctl,  cJSON *data_obj, cJSON *msgid_obj)
 {
     MW_ERROR_NO_T rc = MW_E_OK;
@@ -3652,8 +4722,19 @@ static MW_ERROR_NO_T _mqttd_handle_getconfig_data(MQTTD_CTRL_T *mqttdctl,  cJSON
                 // Handle "filter_mac" case
             } else if (osapi_strcmp(child->valuestring, "vlan_member") == 0) {
                 // Handle "vlan_member" case
+                rc = _mqttd_handle_getconfig_vlan_member(mqttdctl, data);
+                if(MW_E_OK != rc){
+                    mqttd_debug("Handling getConfig vlan_member failed.");
+                    break;
+                }
             } else if (osapi_strcmp(child->valuestring, "vlan_setting") == 0) {
                 // Handle "vlan_setting" case
+                rc = _mqttd_handle_getconfig_vlan_setting(mqttdctl, data);
+                if(MW_E_OK != rc){
+                    mqttd_debug("Handling getConfig vlan_setting failed.");
+                    break;
+                }
+
             } else if (osapi_strcmp(child->valuestring, "port_limit_rate") == 0) {
                 // Handle "port_limit_rate" case
             } else if (osapi_strcmp(child->valuestring, "storm_control") == 0) {
@@ -3741,7 +4822,7 @@ static MW_ERROR_NO_T  _mqttd_handle_reset(MQTTD_CTRL_T *mqttdctl,  cJSON *data_o
     int rc = MW_E_OK;
     BOOL_T reboot = TRUE;
     DB_SYSTEM_T sys_cfg;
-
+	char *original_payload = NULL;
 	osapi_printf("mqttd handle reset.\n");
 
     /* parser params to db format */
@@ -3756,12 +4837,69 @@ static MW_ERROR_NO_T  _mqttd_handle_reset(MQTTD_CTRL_T *mqttdctl,  cJSON *data_o
         {
             UI8_T enable = FALSE;
             rc = mqttd_queue_setData(M_UPDATE, MQTTD_CFG_INFO, MQTTD_CFG_ENABLE, DB_ALL_ENTRIES, &enable, sizeof(enable));
+            if(MW_E_OK != rc){
+                mqttd_debug("Disable mqttd failed.");
+            }
         }
-
-        air_chipscu_resetSystem(0);
+        //air_chipscu_resetSystem(0);
     }
 
+    // 创建一个新的 JSON 对象
+    cJSON *root = cJSON_CreateObject();
+
+    // 添加键值对到 JSON 对象
+    cJSON_AddStringToObject(root, "type", "reset");
+    cJSON_AddStringToObject(root, "msg_id", "quah1ooW");
+    cJSON_AddStringToObject(root, "result", "ok");
+
+    // 将 JSON 对象转换为字符串
+    original_payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    root = NULL;
+
+    // 打印 JSON 字符串
+    mqttd_debug("Publish RX Topic Message: %s\n", original_payload);
+
+   /* PUBLISH capability with rx topic */
+    char topic[128];
+    osapi_snprintf(topic, sizeof(topic), "%s/rx", mqttdctl->topic_prefix);
+    int original_payloadlen = strlen(original_payload)+1;
+    //unsigned char encoded_payload[1024];
+    
+    if(original_payloadlen > MQTTD_MAX_PACKET_SIZE)
+    {
+        mqttd_debug("Original payload length is too long:%d.", original_payloadlen);
+        goto local_error;
+    }
+    
+    osapi_memset(mqttdctl->mqtt_buff, 0, MQTTD_MQX_OUTPUT_SIZE);
+    mqttd_rc4_encrypt((unsigned char *)original_payload, original_payloadlen, MQTTD_RC4_KEY, mqttdctl->mqtt_buff);
+    rc = mqtt_publish(mqttdctl->ptr_client, topic, (const void *)mqttdctl->mqtt_buff, original_payloadlen, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)mqttdctl);
+    if(MW_E_OK != rc){
+        mqttd_debug("Publish reset failed.");
+    }
+
+    // 释放内存
+    cJSON_free(original_payload); 
+    original_payload= NULL;  
+
+    //重启设备
+    mqttd_debug("start reset system ......");
+    air_chipscu_resetSystem(0);
+
     return rc;
+
+local_error:
+    if(root) {
+        cJSON_Delete(root);
+        root = NULL;
+    }
+    if(original_payload){
+        cJSON_free(original_payload);     
+        original_payload = NULL;  
+    }
+
+    return MW_E_NO_MEMORY;
 }
 
 static MW_ERROR_NO_T  _mqttd_handle_reboot(MQTTD_CTRL_T *mqttdctl,  cJSON *data_obj)
@@ -3769,8 +4907,10 @@ static MW_ERROR_NO_T  _mqttd_handle_reboot(MQTTD_CTRL_T *mqttdctl,  cJSON *data_
     int rc = MW_E_OK;
     BOOL_T reboot = TRUE;
     DB_SYSTEM_T sys_cfg;
+    cJSON *root = NULL;
+    char *original_payload = NULL;
 
-	osapi_printf("mqttd handle reboot.\n");
+    mqttd_debug("Handling reboot type.");
 
     /* parser params to db format */
     if (TRUE == reboot)
@@ -3783,14 +4923,67 @@ static MW_ERROR_NO_T  _mqttd_handle_reboot(MQTTD_CTRL_T *mqttdctl,  cJSON *data_
         {
             UI8_T enable = FALSE;
             rc = mqttd_queue_setData(M_UPDATE, MQTTD_CFG_INFO, MQTTD_CFG_ENABLE, DB_ALL_ENTRIES, &enable, sizeof(enable));
-        }
-
-        air_chipscu_resetSystem(0);
+            if(MW_E_OK != rc){
+                mqttd_debug("Disable mqttd failed.");
+            }
+        }        
     }
 
-    return rc;
-}
+    //create rx json
+    // 创建一个新的 JSON 对象
+    root = cJSON_CreateObject();
 
+    // 添加键值对到 JSON 对象
+    cJSON_AddStringToObject(root, "type", "reboot");
+    cJSON_AddStringToObject(root, "msg_id", "maes1ooW");
+    cJSON_AddStringToObject(root, "result", "ok");
+
+    // 将 JSON 对象转换为字符串
+    original_payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    root = NULL;
+
+    // 打印 JSON 字符串
+    mqttd_debug("Publish RX Topic Message: %s\n", original_payload);
+
+   /* PUBLISH capability with rx topic */
+    char topic[128];
+    osapi_snprintf(topic, sizeof(topic), "%s/rx", mqttdctl->topic_prefix);
+    int original_payloadlen = strlen(original_payload)+1;
+    //unsigned char encoded_payload[1024];
+    
+    if(original_payloadlen > MQTTD_MAX_PACKET_SIZE)
+    {
+        mqttd_debug("Original payload length is too long:%d.", original_payloadlen);
+        goto local_error;
+    }
+    
+    osapi_memset(mqttdctl->mqtt_buff, 0, MQTTD_MQX_OUTPUT_SIZE);
+    mqttd_rc4_encrypt((unsigned char *)original_payload, original_payloadlen, MQTTD_RC4_KEY, mqttdctl->mqtt_buff);
+    mqtt_publish(mqttdctl->ptr_client, topic, (const void *)mqttdctl->mqtt_buff, original_payloadlen, MQTTD_REQUEST_QOS, MQTTD_REQUEST_RETAIN, _mqttd_publish_cb, (void *)mqttdctl);
+
+    // 释放内存
+    cJSON_free(original_payload); 
+    original_payload= NULL;  
+
+    //重启设备
+    mqttd_debug("start reboot system ......");
+    air_chipscu_resetSystem(0);
+
+    return rc;
+
+local_error:
+    if(root) {
+        cJSON_Delete(root);
+        root = NULL;
+    }
+    if(original_payload){
+        cJSON_free(original_payload);     
+        original_payload = NULL;  
+    }
+
+    return MW_E_NO_MEMORY;
+}
 
 #if 0
 /* FUNCTION NAME: _mqttd_incoming_data_cb
@@ -3948,7 +5141,7 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
             }
             else if (osapi_strcmp(type_str, "rules") == 0 && (cJSON_IsObject(data_obj) && (data_obj->child != NULL)))
             {
-                rc = _mqttd_handle_rules_data(ptr_mqttd, data_obj);/* !! send result back */
+                rc = _mqttd_handle_rules_data(ptr_mqttd, data_obj); /* no need response */
 				if(rc != MW_E_OK)
 				{
 					mqttd_debug("Handling rules type failed.");
@@ -3973,7 +5166,7 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
             }
             else if (osapi_strcmp(type_str, "setConfig") == 0 && (cJSON_IsObject(data_obj) && (data_obj->child != NULL)))
             {
-            	rc = _mqttd_handle_setconfig_data(ptr_mqttd, data_obj); /* !! send result back */
+            	rc = _mqttd_handle_setconfig_data(ptr_mqttd, data_obj);
 				if(rc != MW_E_OK)
 				{
 					mqttd_debug("Handling setConfig type failed.");
@@ -3982,10 +5175,14 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
 				{
 					mqttd_debug("Handling setConfig type done.");
 				}
+				//send mqtt setconfig rx message
+    			if(_mqttd_handle_setconfig_response(ptr_mqttd, msgid_obj, rc) != MW_E_OK){
+			        mqttd_debug("Handling setConfig response failed.");
+			    }
             }
             else if (osapi_strcmp(type_str, "reset") == 0)
             {
-                rc = _mqttd_handle_reset(ptr_mqttd, data_obj); /* !! send result back */
+                rc = _mqttd_handle_reset(ptr_mqttd, data_obj); 
 				if(rc != MW_E_OK)
 				{
 					mqttd_debug("Handling reset failed.");
@@ -3998,7 +5195,7 @@ static void _mqttd_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t
             }
             else if (osapi_strcmp(type_str, "reboot") == 0)
             {
-                rc = _mqttd_handle_reboot(ptr_mqttd, data_obj); /* !! send result back */
+                rc = _mqttd_handle_reboot(ptr_mqttd, data_obj); 
 				if(rc != MW_E_OK)
 				{
 					mqttd_debug("Handling reboot failed.");
