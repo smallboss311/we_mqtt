@@ -796,7 +796,7 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
 {
     MW_ERROR_NO_T rc = MW_E_OK;
 	DB_PORT_OPER_INFO_T port_oper_info;
-    //DB_PORT_CFG_INFO_T *port_cfg_info = NULL;
+    DB_PORT_CFG_INFO_T *port_cfg_info = NULL;
     DB_MSG_T *ptr_db_msg = NULL;
     u16_t db_size = 0;
     void *db_data = NULL;
@@ -805,12 +805,12 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
     char topic[80];
     osapi_snprintf(topic, sizeof(topic), "%s/period", ptr_mqttd->topic_prefix);
 
-    //port_cfg_info = mqtt_malloc(sizeof(DB_PORT_CFG_INFO_T));
-    ///if(port_cfg_info == NULL)
-    //{
-    //    osapi_printf("Failed to allocate memory for port_cfg_info.");
-    //    return;
-    // }
+    port_cfg_info = mqtt_malloc(sizeof(DB_PORT_CFG_INFO_T));
+    if(port_cfg_info == NULL)
+    {
+        osapi_printf("Failed to allocate memory for port_cfg_info.");
+        return;
+     }
     cJSON *root = cJSON_CreateObject();
     if (root == NULL)
     {
@@ -879,7 +879,7 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
         memcpy(&port_oper_info, db_data, sizeof(DB_PORT_OPER_INFO_T));
 	    mqtt_free(ptr_db_msg);
 
-#if 0
+#if 1
         memset(port_cfg_info, 0, sizeof(DB_PORT_CFG_INFO_T));
         rc = mqttd_queue_getData(PORT_CFG_INFO, DB_ALL_FIELDS, i, &ptr_db_msg, &db_size, &db_data);
 	    if(MW_E_OK != rc)
@@ -891,8 +891,10 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
         memcpy(port_cfg_info, db_data, sizeof(DB_PORT_CFG_INFO_T));
 	    mqtt_free(ptr_db_msg);
 #endif
-        cJSON_AddNumberToObject(json_port_entry, "index", i);
-        cJSON_AddStringToObject(json_port_entry, "name", "port");
+        cJSON_AddNumberToObject(json_port_entry, "index", i+1);
+        char port_name[10];
+        snprintf(port_name, sizeof(port_name), "port%d", i+1);
+        cJSON_AddStringToObject(json_port_entry, "name", port_name);
 
 #ifdef AIR_SUPPORT_SFP
 		SFP_DB_PORT_BASIC_TYPE_T basic_port_type = (port_oper_info.oper_mode >> SFP_DB_PORT_MODE_BASIC_PORT_TYPE_OFFSET) & SFP_DB_PORT_MODE_BASIC_PORT_TYPE_BITMASK;
@@ -906,7 +908,7 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
 		cJSON_AddNumberToObject(json_port_entry, "type", 0);
 #endif
 
-#if 0
+#if 1
 		if(port_cfg_info->admin_status == 0)
 		{
 			cJSON_AddStringToObject(json_port_entry, "state", "close");
@@ -918,13 +920,14 @@ static void _mqttd_publish_status(MQTTD_CTRL_T *ptr_mqttd)
 			else
 				cJSON_AddStringToObject(json_port_entry, "state", "down");
 		}
-#endif
+#else
 		if(port_oper_info.oper_status = 1)
 			cJSON_AddStringToObject(json_port_entry, "state", "up");
 		else if(port_oper_info.oper_status = 0)
 			cJSON_AddStringToObject(json_port_entry, "state", "down");
 		else
 			cJSON_AddStringToObject(json_port_entry, "state", "close");
+#endif
 
         cJSON_AddNumberToObject(json_port_entry, "speed", port_oper_info.oper_speed);
         cJSON_AddNumberToObject(json_port_entry, "duplex", port_oper_info.oper_duplex);
@@ -1486,6 +1489,9 @@ static MW_ERROR_NO_T _mqttd_publish_portcfg(MQTTD_CTRL_T *ptr_mqttd,  const DB_R
     void *db_data = NULL;
     DB_PORT_CFG_INFO_T *ptr_port_cfg_info = NULL;
 	osapi_printf("publish portcfg: T/F/E =%u/%u/%u\n", req->t_idx, req->f_idx, req->e_idx);
+
+	if(req->f_idx == PORT_ADMIN_SPD_ABILITY || req->f_idx == PORT_MIRROR_ID)
+		return MW_E_OK;
 	
     rc = mqttd_queue_getData(PORT_CFG_INFO, DB_ALL_FIELDS, req->e_idx, &db_msg, &db_size, &db_data);
     if(MW_E_OK == rc)
@@ -1494,6 +1500,13 @@ static MW_ERROR_NO_T _mqttd_publish_portcfg(MQTTD_CTRL_T *ptr_mqttd,  const DB_R
         char topic[80];
         osapi_snprintf(topic, sizeof(topic), "%s/event", ptr_mqttd->topic_prefix);
         ptr_port_cfg_info = (DB_PORT_CFG_INFO_T *)db_data;
+        osapi_printf("Port Configuration Info (Port Index: %u):\n", req->e_idx);
+        osapi_printf("Admin Status: %u\n", ptr_port_cfg_info->admin_status);
+        osapi_printf("Admin Speed: %u\n", ptr_port_cfg_info->admin_speed);
+        osapi_printf("Admin Duplex: %u\n", ptr_port_cfg_info->admin_duplex);
+        osapi_printf("Admin Flow Control: %u\n", ptr_port_cfg_info->admin_flow_ctrl);
+        osapi_printf("Admin Speed Ability: %u\n", ptr_port_cfg_info->admin_spd_ability);
+        osapi_printf("EEE Enable: %u\n", ptr_port_cfg_info->eee_enable);
 
         cJSON *root = cJSON_CreateObject();
         cJSON *data = cJSON_CreateObject();
@@ -1505,15 +1518,24 @@ static MW_ERROR_NO_T _mqttd_publish_portcfg(MQTTD_CTRL_T *ptr_mqttd,  const DB_R
         cJSON_AddItemToObject(data, "port_setting", port_setting);
         cJSON_AddItemToArray(port_setting, port_setting_entry);
         cJSON_AddNumberToObject(port_setting_entry, "id", req->e_idx);
-        cJSON_AddStringToObject(port_setting_entry, "n", "");
-        cJSON_AddNumberToObject(port_setting_entry, "en", ptr_port_cfg_info->admin_status);
-        if(AIR_PORT_SPEED_10M == ptr_port_cfg_info->admin_speed)
-            cJSON_AddStringToObject(port_setting_entry, "sp", "10");
-        else if(AIR_PORT_SPEED_100M == ptr_port_cfg_info->admin_speed)
-            cJSON_AddStringToObject(port_setting_entry, "sp", "100");
-        else if(AIR_PORT_SPEED_1000M == ptr_port_cfg_info->admin_speed)
-            cJSON_AddStringToObject(port_setting_entry, "sp", "1000");
-        cJSON_AddNumberToObject(port_setting_entry, "du", ptr_port_cfg_info->admin_duplex);
+        char port_name[10];
+        snprintf(port_name, sizeof(port_name), "port%d", req->e_idx);
+        cJSON_AddStringToObject(port_setting_entry, "n", port_name);
+        cJSON_AddNumberToObject(port_setting_entry, "en", ptr_port_cfg_info->admin_status>0?1:0);
+		/*an: 0
+		10M:1
+		100M:2
+		1000M:3*/
+        cJSON_AddNumberToObject(port_setting_entry, "sp", ptr_port_cfg_info->admin_speed);
+		
+        /*Duplex
+		half: 0
+		full: 1*/
+        if(ptr_port_cfg_info->admin_speed == 0)
+        	cJSON_AddNumberToObject(port_setting_entry, "du", 0);
+        else
+        	cJSON_AddNumberToObject(port_setting_entry, "du", ptr_port_cfg_info->admin_duplex+3);
+        	
         cJSON_AddNumberToObject(port_setting_entry, "fc_p", ptr_port_cfg_info->admin_flow_ctrl);
         //cJSON_AddNumberToObject(port_setting_entry, "nv", ptr_port_cfg_info->pvid);
         //cJSON_AddNumberToObject(port_setting_entry, "vlanlist", ptr_port_cfg_info->vlan_list);
@@ -1583,7 +1605,7 @@ static MW_ERROR_NO_T _mqttd_publish_jumbo_frame(MQTTD_CTRL_T *ptr_mqttd,  const 
     DB_MSG_T *ptr_db_msg = NULL;
     u16_t db_size = 0;
     void *db_data = NULL;
-    osapi_printf("mqttd publish jumbo frame.\n");
+    osapi_printf("publish jumbo frame: T/F/E =%u/%u/%u\n", req->t_idx, req->f_idx, req->e_idx);
     memset(&jumbo_frame_info, 0, sizeof(DB_JUMBO_FRAME_INFO_T));
     rc = mqttd_queue_getData(JUMBO_FRAME_INFO, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_db_msg, &db_size, &db_data);
     if(MW_E_OK != rc)
@@ -1609,25 +1631,42 @@ static MW_ERROR_NO_T _mqttd_publish_jumbo_frame(MQTTD_CTRL_T *ptr_mqttd,  const 
 	return rc;
 }
 
+/* The port mirror information table */
+typedef struct ONE_DB_PORT_MIRROR_INFO_S
+{
+    UI8_T           enable;      /* The admin status of the port mirror session */
+    UI8_T           dest_port;   /* The destination port of the mirror session */
+    UI32_T          src_in_port; /* The ingress traffic of the source port */
+    UI32_T          src_eg_port; /* The egress traffic of the source port */
+} ATTRIBUTE_PACK ONE_DB_PORT_MIRROR_INFO_T;
+
 
 static MW_ERROR_NO_T _mqttd_publish_port_mirroring(MQTTD_CTRL_T *ptr_mqttd,  const DB_REQUEST_TYPE_T *req, const void *ptr_data)
 {
     MW_ERROR_NO_T rc = MW_E_OK;
-	DB_PORT_MIRROR_INFO_T port_mirror_info;
+	ONE_DB_PORT_MIRROR_INFO_T port_mirror_info;
     DB_MSG_T *ptr_db_msg = NULL;
     u16_t db_size = 0;
     void *db_data = NULL;
-	osapi_printf("mqttd publish port mirroring.\n");
+    int i = 0;
+	osapi_printf("publish port mirroring: T/F/E =%u/%u/%u\n", req->t_idx, req->f_idx, req->e_idx);
     memset(&port_mirror_info, 0, sizeof(DB_PORT_MIRROR_INFO_T));
-    rc = mqttd_queue_getData(PORT_MIRROR_INFO, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_db_msg, &db_size, &db_data);
+    rc = mqttd_queue_getData(PORT_MIRROR_INFO, DB_ALL_FIELDS, req->e_idx, &ptr_db_msg, &db_size, &db_data);
     if(MW_E_OK != rc)
     {
         mqttd_debug("Get org DB port_mirror_info failed(%d)\n", rc);
 		return rc;
     }
-    memcpy(&port_mirror_info, db_data, sizeof(DB_PORT_MIRROR_INFO_T));
+    memcpy(&port_mirror_info, db_data, sizeof(ONE_DB_PORT_MIRROR_INFO_T));
     mqtt_free(ptr_db_msg);
     
+    osapi_printf("Port Mirror Info:\n");
+    osapi_printf("Session %d:\n", req->e_idx);
+    osapi_printf("  Enable: %d\n", port_mirror_info.enable);
+    osapi_printf("  Source In Port: 0x%x\n", port_mirror_info.src_in_port);
+    osapi_printf("  Source Eg Port: 0x%x\n", port_mirror_info.src_eg_port);
+    osapi_printf("  Destination Port: %d\n", port_mirror_info.dest_port);
+
     char topic[80];
     osapi_snprintf(topic, sizeof(topic), "%s/event", ptr_mqttd->topic_prefix);
 	cJSON *root = cJSON_CreateObject();
@@ -1637,41 +1676,32 @@ static MW_ERROR_NO_T _mqttd_publish_port_mirroring(MQTTD_CTRL_T *ptr_mqttd,  con
 	cJSON_AddItemToObject(root, "data", data);
     cJSON_AddItemToObject(data, "port_mirroring", json_port_mirror_info);
 
-    int i = 0;
-    for (i = 0; i < MAX_MIRROR_SESS_NUM; i++)
+    //blank entry
+    #if 0
+    if(port_mirror_info.enable == 0)
+        continue;
+    #endif
+    
+    cJSON *json_port_mirror_entry = cJSON_CreateObject();
+    cJSON_AddNumberToObject(json_port_mirror_entry, "gid", req->e_idx);
+    cJSON *json_src_in_ports = cJSON_CreateArray();
+    cJSON_AddItemToArray(json_src_in_ports, cJSON_CreateNumber(port_mirror_info.src_in_port));
+    cJSON_AddItemToObject(json_port_mirror_entry, "sp", json_src_in_ports);
+    cJSON_AddNumberToObject(json_port_mirror_entry, "tp", port_mirror_info.src_eg_port);
+    if(port_mirror_info.src_in_port != 0 && port_mirror_info.src_eg_port != 0)
     {
-        //blank entry
-        #if 1
-        if(port_mirror_info.enable[i] == 0)
-            continue;
-        #endif
-        cJSON *json_port_mirror_entry = cJSON_CreateObject();
-        if (json_port_mirror_entry == NULL)
-        {
-            mqttd_debug("Failed to create JSON object for port_mirror entry.");
-            cJSON_Delete(json_port_mirror_info);
-            return MW_E_NO_MEMORY;
-        }
-        cJSON_AddNumberToObject(json_port_mirror_entry, "gid", i);
-        cJSON *json_src_in_ports = cJSON_CreateArray();
-        cJSON_AddItemToArray(json_src_in_ports, cJSON_CreateNumber(port_mirror_info.src_in_port[i]));
-        cJSON_AddItemToObject(json_port_mirror_entry, "sp", json_src_in_ports);
-        cJSON_AddNumberToObject(json_port_mirror_entry, "tp", port_mirror_info.src_eg_port[i]);
-        if(port_mirror_info.src_in_port[i] != 0 && port_mirror_info.src_eg_port[i] != 0)
-        {
-            cJSON_AddNumberToObject(json_port_mirror_entry, "dir", 3);
-        }
-        else if(port_mirror_info.src_in_port[i] != 0)
-        {
-            cJSON_AddNumberToObject(json_port_mirror_entry, "dir", 1);
-        }
-        else if(port_mirror_info.src_eg_port[i] != 0)
-        {
-            cJSON_AddNumberToObject(json_port_mirror_entry, "dir", 2);
-        }
-        cJSON_AddItemToArray(json_port_mirror_info, json_port_mirror_entry);
+        cJSON_AddNumberToObject(json_port_mirror_entry, "dir", 3);
     }
-
+    else if(port_mirror_info.src_in_port != 0)
+    {
+        cJSON_AddNumberToObject(json_port_mirror_entry, "dir", 1);
+    }
+    else if(port_mirror_info.src_eg_port != 0)
+    {
+        cJSON_AddNumberToObject(json_port_mirror_entry, "dir", 2);
+    }
+    cJSON_AddItemToArray(json_port_mirror_info, json_port_mirror_entry);
+ 
   	mqtt_send_json_and_free(ptr_mqttd, topic, root);
 
 	return rc;
@@ -1685,7 +1715,7 @@ static MW_ERROR_NO_T _mqttd_publish_static_mac(MQTTD_CTRL_T *ptr_mqttd,  const D
     DB_MSG_T *ptr_db_msg = NULL;
     u16_t db_size = 0;
     void *db_data = NULL;
-	osapi_printf("mqttd publish static mac.\n");
+	osapi_printf("publish static mac: T/F/E =%u/%u/%u\n", req->t_idx, req->f_idx, req->e_idx);
     memset(&static_mac_info, 0, sizeof(DB_STATIC_MAC_ENTRY_T));
     rc = mqttd_queue_getData(STATIC_MAC_ENTRY, DB_ALL_FIELDS, DB_ALL_ENTRIES, &ptr_db_msg, &db_size, &db_data);
     if(MW_E_OK != rc)

@@ -64,6 +64,9 @@ static MW_ERROR_NO_T _mqttd_cmd_enable(const C8_T *tokens[], UI32_T token_idx);
 static MW_ERROR_NO_T _mqttd_cmd_dump_topic(const C8_T *tokens[], UI32_T token_idx);
 static MW_ERROR_NO_T _mqttd_cmd_debug(const C8_T *tokens[], UI32_T token_idx);
 static MW_ERROR_NO_T _mqttd_cmd_show_state(const C8_T *tokens[], UI32_T token_idx);
+static MW_ERROR_NO_T _mqttd_cmd_coding(const C8_T *tokens[], UI32_T token_idx);
+static MW_ERROR_NO_T _mqttd_cmd_json(const C8_T *tokens[], UI32_T token_idx);
+
 
 
 /* GLOBAL VARIABLE DECLARATIONS
@@ -87,11 +90,11 @@ static MW_CMD_VEC_T _mw_mqttd_cmd_vec[] =
         "mqttd show state\n"
     },
     {
-        "encode", 1, _mqttd_cmd_enable,
+        "encode", 1, _mqttd_cmd_coding,
         "mqttd encode { enable | disable }\n"
     },
     {
-        "json", 1, _mqttd_cmd_enable,
+        "json", 1, _mqttd_cmd_json,
         "mqttd json { enable | disable }\n"
     },
 };
