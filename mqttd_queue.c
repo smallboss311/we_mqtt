@@ -100,9 +100,26 @@ mqttd_queue_init()
 {
     MW_ERROR_NO_T rc = MW_E_OK;
 
-    /* message CLI name */
+    /* Create a queue for the non-blocking interaction with the DB task */
     rc = osapi_msgCreate(
         MQTTD_QUEUE_NAME,
+        MQTTD_QUEUE_LEN,
+        MQTTD_ACCEPTMBOX_SIZE);
+    if (MW_E_OK != rc)
+    {
+        return MW_E_NOT_INITED;
+    }
+    
+    return MW_E_OK;
+}
+MW_ERROR_NO_T inline
+mqttd_get_queue_init()
+{
+    MW_ERROR_NO_T rc = MW_E_OK;
+    
+    /* Create a queue for the blocking interaction with the DB task */
+    rc = osapi_msgCreate(
+        MQTTD_GET_QUEUE_NAME,
         MQTTD_QUEUE_LEN,
         MQTTD_ACCEPTMBOX_SIZE);
     if (MW_E_OK != rc)
@@ -149,6 +166,27 @@ mqttd_queue_free()
     osapi_msgDelete(MQTTD_QUEUE_NAME);
 }
 
+void
+mqttd_get_queue_free()
+{
+    MW_ERROR_NO_T rc = MW_E_OK;
+    UI8_T *ptr_msg = NULL;
+
+    /* Flush the queue message */
+    do
+    {
+        rc = dbapi_recvMsg(
+                MQTTD_GET_QUEUE_NAME,
+                &ptr_msg,
+                MQTTD_QUEUE_TIMEOUT);
+        if (MW_E_OK == rc)
+        {
+            osapi_free(ptr_msg);
+        }
+    }while(MW_E_OK == rc);
+    osapi_msgDelete(MQTTD_GET_QUEUE_NAME);
+}
+
 /* FUNCTION NAME: mqttd_queue_recv
  * PURPOSE:
  *      Receive DB communication message from DB.
@@ -176,6 +214,28 @@ mqttd_queue_recv(
 
     rc = dbapi_recvMsg(
         MQTTD_QUEUE_NAME,
+        &ptr_msg,
+        MQTTD_QUEUE_BLOCKTIMEOUT);
+    if (MW_E_OK != rc)
+    {
+        return rc;
+    }
+
+    mqttd_debug_db("ptr_msg=%p", ptr_msg);
+    (*ptr_buf) = ptr_msg;
+
+    return MW_E_OK;
+}
+
+MW_ERROR_NO_T
+mqttd_get_queue_recv(
+    void **ptr_buf)
+{
+    MW_ERROR_NO_T rc;
+    UI8_T *ptr_msg = NULL;
+
+    rc = dbapi_recvMsg(
+        MQTTD_GET_QUEUE_NAME,
         &ptr_msg,
         MQTTD_QUEUE_BLOCKTIMEOUT);
     if (MW_E_OK != rc)
@@ -272,15 +332,96 @@ mqttd_queue_send(
 
     /* message */
     dbapi_setMsgHeader(ptr_msg, MQTTD_QUEUE_NAME, method, 1);
-    mqttd_debug_db("method=0x%X", ptr_msg ->method);
+    //mqttd_debug_db("method=0x%X", ptr_msg ->method);
 
     /* payload */
     ptr_payload = (DB_PAYLOAD_T *)&(ptr_msg ->ptr_payload);
     dbapi_setMsgPayload(method, t_idx, f_idx, e_idx, ptr_data, (void *)ptr_payload);
-    mqttd_debug_db("T/F/E=%u/%u/%u", ptr_payload ->request.t_idx,
+    /*mqttd_debug_db("T/F/E=%u/%u/%u", ptr_payload ->request.t_idx,
                                     ptr_payload ->request.f_idx,
                                     ptr_payload ->request.e_idx);
-    mqttd_debug_db("data_size=%u", ptr_payload ->data_size);
+    mqttd_debug_db("data_size=%u", ptr_payload ->data_size);*/
+
+    /* Send message to DB */
+
+    rc = dbapi_sendMsg(ptr_msg, MQTTD_QUEUE_TIMEOUT);
+    if (MW_E_OK != rc)
+    {
+        osapi_printf("%s: Send message to DB failed(%d)\n", __func__, rc);
+        return rc;
+    }
+
+    (*pptr_out_msg) = ptr_msg;
+    return MW_E_OK;
+}
+
+MW_ERROR_NO_T
+mqttd_get_queue_send(
+    const UI8_T method,
+    const UI8_T t_idx,
+    const UI8_T f_idx,
+    const UI16_T e_idx,
+    const void *ptr_data,
+    const UI16_T size,
+    DB_MSG_T **pptr_out_msg)
+{
+    MW_ERROR_NO_T   rc = MW_E_OK;
+    DB_MSG_T        *ptr_msg = NULL;
+    DB_PAYLOAD_T    *ptr_payload = NULL;
+    UI32_T          msg_size;
+    UI16_T          total_size = 0;
+
+    if (NULL == osapi_msgFindHandle(MQTTD_GET_QUEUE_NAME))
+    {
+        mqttd_debug_db("mqttd queue does not exist");
+        return MW_E_NOT_INITED;
+    }
+    MW_PARAM_CHK((t_idx >= TABLES_LAST), MW_E_BAD_PARAMETER);
+    if (size > 0 && method != M_GET)
+    {
+        DB_REQUEST_TYPE_T request = {
+            .t_idx = t_idx,
+            .f_idx = f_idx,
+            .e_idx = e_idx
+        };
+
+        rc = dbapi_getDataSize(request, &total_size);
+        if (MW_E_OK != rc)
+        {
+           return rc;
+        }
+
+        if (size > total_size)
+        {
+           return MW_E_OP_INCOMPLETE;
+        }
+        msg_size = DB_MSG_HEADER_SIZE + DB_MSG_PAYLOAD_SIZE + total_size;
+    }
+    else
+    {
+        msg_size = DB_MSG_HEADER_SIZE + DB_MSG_PAYLOAD_SIZE + size;
+    }
+    rc = osapi_calloc(
+            msg_size,
+            MQTTD_GET_QUEUE_NAME,
+            (void **)&ptr_msg);
+    if (MW_E_OK != rc)
+    {
+        osapi_printf("%s: allocate memory failed(%d)\n", __func__, rc);
+        return MW_E_NO_MEMORY;
+    }
+
+    /* message */
+    dbapi_setMsgHeader(ptr_msg, MQTTD_GET_QUEUE_NAME, method, 1);
+    //mqttd_debug_db("method=0x%X", ptr_msg ->method);
+
+    /* payload */
+    ptr_payload = (DB_PAYLOAD_T *)&(ptr_msg ->ptr_payload);
+    dbapi_setMsgPayload(method, t_idx, f_idx, e_idx, ptr_data, (void *)ptr_payload);
+    /*mqttd_debug_db("T/F/E=%u/%u/%u", ptr_payload ->request.t_idx,
+                                    ptr_payload ->request.f_idx,
+                                    ptr_payload ->request.e_idx);
+    mqttd_debug_db("data_size=%u", ptr_payload ->data_size);*/
 
     /* Send message to DB */
 
@@ -332,7 +473,7 @@ mqttd_queue_setData(
     MW_ERROR_NO_T   rc = MW_E_OK;
     DB_MSG_T        *ptr_msg = NULL;
 
-    rc = mqttd_queue_send(method, t_idx, f_idx, e_idx, ptr_data, size, &ptr_msg);
+    rc = mqttd_get_queue_send(method, t_idx, f_idx, e_idx, ptr_data, size, &ptr_msg);
     if (MW_E_OK != rc)
     {
         osapi_printf("%s: mqttd_queue_send failed(%d)\n", __func__, rc);
@@ -394,18 +535,18 @@ mqttd_queue_getData(
        return rc;
     }
 
-    rc = mqttd_queue_send(M_GET, in_t_idx, in_f_idx, in_e_idx, NULL, total_size, &ptr_msg);
+    rc = mqttd_get_queue_send(M_GET, in_t_idx, in_f_idx, in_e_idx, NULL, total_size, &ptr_msg);
     if (MW_E_OK != rc)
     {
        mqttd_debug_db("mqttd_queue_send failed(%d)\n", rc);
        return rc;
     }
-
+	//osapi_printf("mqttd_queue_send: %p\n", ptr_msg);
     /* wait for DB response messgae */
-    rc = mqttd_queue_recv((void **)&ptr_msg);
+    rc = mqttd_get_queue_recv((void **)&ptr_msg);
     if(MW_E_OK == rc)
     {
-        mqttd_debug_db("mqttd_queue_recv success \n");
+        //mqttd_debug_db("mqttd_queue_recv success \n");
     }
     else
     {
