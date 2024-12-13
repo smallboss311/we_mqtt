@@ -1502,8 +1502,8 @@ static MW_ERROR_NO_T _mqttd_publish_portcfg(MQTTD_CTRL_T *ptr_mqttd,  const DB_R
     void *db_data = NULL;
     DB_PORT_CFG_INFO_T *ptr_port_cfg_info = NULL;
 	osapi_printf("publish portcfg: T/F/E =%u/%u/%u\n", req->t_idx, req->f_idx, req->e_idx);
-
-	if(req->f_idx == PORT_ADMIN_SPD_ABILITY || req->f_idx == PORT_MIRROR_ID)
+ 
+	if(req->f_idx != PORT_ADMIN_STATUS)
 		return MW_E_OK;
 	
     rc = mqttd_queue_getData(PORT_CFG_INFO, DB_ALL_FIELDS, req->e_idx, &db_msg, &db_size, &db_data);
@@ -1513,6 +1513,7 @@ static MW_ERROR_NO_T _mqttd_publish_portcfg(MQTTD_CTRL_T *ptr_mqttd,  const DB_R
         char topic[80];
         osapi_snprintf(topic, sizeof(topic), "%s/event", ptr_mqttd->topic_prefix);
         ptr_port_cfg_info = (DB_PORT_CFG_INFO_T *)db_data;
+#if 0     
         osapi_printf("Port Configuration Info (Port Index: %u):\n", req->e_idx);
         osapi_printf("Admin Status: %u\n", ptr_port_cfg_info->admin_status);
         osapi_printf("Admin Speed: %u\n", ptr_port_cfg_info->admin_speed);
@@ -1520,7 +1521,7 @@ static MW_ERROR_NO_T _mqttd_publish_portcfg(MQTTD_CTRL_T *ptr_mqttd,  const DB_R
         osapi_printf("Admin Flow Control: %u\n", ptr_port_cfg_info->admin_flow_ctrl);
         osapi_printf("Admin Speed Ability: %u\n", ptr_port_cfg_info->admin_spd_ability);
         osapi_printf("EEE Enable: %u\n", ptr_port_cfg_info->eee_enable);
-
+#endif
         cJSON *root = cJSON_CreateObject();
         cJSON *data = cJSON_CreateObject();
         cJSON *port_setting = cJSON_CreateObject();
@@ -1654,6 +1655,9 @@ static MW_ERROR_NO_T _mqttd_publish_port_mirroring(MQTTD_CTRL_T *ptr_mqttd,  con
     void *db_data = NULL;
     int i = 0;
     osapi_printf("publish port mirroring: T/F/E =%u/%u/%u\n", req->t_idx, req->f_idx, req->e_idx);
+    if(req->f_idx != DB_ALL_FIELDS)
+		return MW_E_OK;
+		
     memset(&port_mirror_info, 0, sizeof(DB_PORT_MIRROR_INFO_T));
     rc = mqttd_queue_getData(PORT_MIRROR_INFO, DB_ALL_FIELDS, req->e_idx, &ptr_db_msg, &db_size, &db_data);
     if(MW_E_OK != rc)
@@ -1664,12 +1668,12 @@ static MW_ERROR_NO_T _mqttd_publish_port_mirroring(MQTTD_CTRL_T *ptr_mqttd,  con
     memcpy(&port_mirror_info, db_data, sizeof(ONE_DB_PORT_MIRROR_INFO_T));
     mqtt_free(ptr_db_msg);
     
-    osapi_printf("Port Mirror Info:\n");
-    osapi_printf("Session %d:\n", req->e_idx);
-    osapi_printf("  Enable: %d\n", port_mirror_info.enable);
-    osapi_printf("  Source In Port: 0x%x\n", port_mirror_info.src_in_port);
-    osapi_printf("  Source Eg Port: 0x%x\n", port_mirror_info.src_eg_port);
-    osapi_printf("  Destination Port: %d\n", port_mirror_info.dest_port);
+    //osapi_printf("Port Mirror Info:\n");
+    //osapi_printf("Session %d:\n", req->e_idx);
+    //osapi_printf("  Enable: %d\n", port_mirror_info.enable);
+    //osapi_printf("  Source In Port: 0x%x\n", port_mirror_info.src_in_port);
+    //osapi_printf("  Source Eg Port: 0x%x\n", port_mirror_info.src_eg_port);
+    //osapi_printf("  Destination Port: %d\n", port_mirror_info.dest_port);
 
     char topic[80];
     osapi_snprintf(topic, sizeof(topic), "%s/event", ptr_mqttd->topic_prefix);
@@ -1679,12 +1683,6 @@ static MW_ERROR_NO_T _mqttd_publish_port_mirroring(MQTTD_CTRL_T *ptr_mqttd,  con
 	cJSON_AddStringToObject(root, "type", "config");
 	cJSON_AddItemToObject(root, "data", data);
     cJSON_AddItemToObject(data, "port_mirroring", json_port_mirror_info);
-
-    //blank entry
-    #if 0
-    if(port_mirror_info.enable == 0)
-        continue;
-    #endif
     
     cJSON *json_port_mirror_entry = cJSON_CreateObject();
     cJSON_AddNumberToObject(json_port_mirror_entry, "gid", req->e_idx);
@@ -1742,7 +1740,7 @@ static MW_ERROR_NO_T _mqttd_publish_static_mac(MQTTD_CTRL_T *ptr_mqttd,  const D
     for (i = 0; i < MAX_STATIC_MAC_NUM; i++)
     {
         //blank entry
-        #if 0
+        #if 1
         if(static_mac_info.port[i] == 0)
             continue;
         #endif
@@ -1914,14 +1912,14 @@ _mqttd_listen_db(
         method = ptr_msg->method;
         mqttd_debug_db("count =%d, method =%u", count, method);
 
-        if (M_UPDATE == method)
+        if (M_UPDATE == (method & M_UPDATE))
         {
             ptr_data = (UI8_T *)&(ptr_msg->ptr_payload);
             while (count > 0)
             {
                 memcpy((void *)&req, (const void *)ptr_data, sizeof(DB_REQUEST_TYPE_T));
                 ptr_data += sizeof(DB_REQUEST_TYPE_T);
-                mqttd_debug_db("T/F/E =%u/%u/%u", req.t_idx, req.f_idx, req.e_idx);
+                //osapi_printf("listen_db[%d]: T/F/E =%u/%u/%u\n", count, req.t_idx, req.f_idx, req.e_idx);
                 /* append db json data to PUBLISH request list */
                 memcpy((void *)&msg_size, (const void *)ptr_data, sizeof(UI16_T));
                 mqttd_debug_db("data size =%u", msg_size);
